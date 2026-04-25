@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
-import { classifyStroke, mergeEndpointsToVertices } from "../lib/strokeAnalysis";
-import type { DiagramObject, ShapeKind, ShapeObject, VertexObject, LineObject, Point } from "../types";
+import { classifyStroke, detectDashGroups, snapEndpointsTogether } from "../lib/strokeAnalysis";
+import type { DiagramObject, ShapeKind, ShapeObject, LineObject } from "../types";
 import { uid } from "../store";
 import { performExport } from "../lib/exporters";
 import { ExportDialog } from "./ExportDialog";
@@ -38,21 +38,65 @@ export function Toolbar({
   const reset = useStore((s) => s.reset);
   const settings = useStore((s) => s.settings);
   const setSettings = useStore((s) => s.setSettings);
+  const undo = useStore((s) => s.undo);
+  const redo = useStore((s) => s.redo);
+  const past = useStore((s) => s.past);
+  const future = useStore((s) => s.future);
 
+  const [openMenu, setOpenMenu] = useState<null | "file" | "edit" | "insert" | "settings" | "shapes">(null);
   const [showExport, setShowExport] = useState(false);
-  const [showSavedList, setShowSavedList] = useState(false);
-  const [showShapes, setShowShapes] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const menuBarRef = useRef<HTMLDivElement>(null);
+
+  // Close any open dropdown on outside click or Escape. Any element marked
+  // [data-menu-region] (the trigger, the dropdown panel, or its contents) is
+  // considered "inside" so clicks on items can still fire their handlers.
+  useEffect(() => {
+    if (!openMenu) return;
+    const close = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (t && t.closest && t.closest("[data-menu-region]")) return;
+      setOpenMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenMenu(null);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openMenu]);
 
   const convert = () => {
     if (strokes.length === 0) {
       setMode("edit");
       return;
     }
+
+    const dashGroups = detectDashGroups(strokes);
+    const consumed = new Set<number>();
+    const dashLines: LineObject[] = [];
+    for (const g of dashGroups) {
+      for (const i of g.strokeIndices) consumed.add(i);
+      dashLines.push({
+        id: uid("ln"),
+        kind: "line",
+        points: [g.start, g.end],
+        style: "dashed",
+        arrow: "none",
+        color: "#111111",
+        strokeWidth: 2,
+        amplitude: 8,
+        wavelength: 16,
+      });
+    }
+
     const newLines: LineObject[] = [];
     const newShapes: ShapeObject[] = [];
-    for (const s of strokes) {
-      const c = classifyStroke(s);
+    for (let i = 0; i < strokes.length; i++) {
+      if (consumed.has(i)) continue;
+      const c = classifyStroke(strokes[i]);
       if (c.kind === "shape") {
         newShapes.push({
           id: uid("shp"),
@@ -62,7 +106,7 @@ export function Toolbar({
           y: c.cy,
           width: c.width,
           height: c.height,
-          rotation: 0,
+          rotation: c.rotation,
           fill: "transparent",
           stroke: "#111111",
           strokeWidth: 2,
@@ -81,40 +125,19 @@ export function Toolbar({
         });
       }
     }
-    // Merge near-by line endpoints into shared vertices.
-    const { vertices: vpts, map } = mergeEndpointsToVertices(
-      newLines.map((l) => ({ id: l.id, points: l.points })),
+
+    const allLines = [...dashLines, ...newLines];
+    const snapped = snapEndpointsTogether(
+      allLines.map((l) => ({ id: l.id, points: l.points })),
       18
     );
-    const vertexObjs: VertexObject[] = vpts.map((p) => ({
-      id: uid("vtx"),
-      kind: "vertex",
-      x: p.x,
-      y: p.y,
-      shape: "circle",
-      fill: "filled",
-      color: "#111111",
-      size: 5,
+    const snapMap = new Map(snapped.map((s) => [s.id, s.points]));
+    const finalLines: LineObject[] = allLines.map((l) => ({
+      ...l,
+      points: snapMap.get(l.id) ?? l.points,
     }));
-    const snapped: LineObject[] = newLines.map((l) => {
-      const m = map[l.id];
-      let pts = l.points.slice();
-      let startVertexId: string | undefined;
-      let endVertexId: string | undefined;
-      if (m?.start !== undefined) {
-        const v = vertexObjs[m.start];
-        pts = [{ x: v.x, y: v.y } as Point, ...pts.slice(1)];
-        startVertexId = v.id;
-      }
-      if (m?.end !== undefined) {
-        const v = vertexObjs[m.end];
-        pts = [...pts.slice(0, pts.length - 1), { x: v.x, y: v.y } as Point];
-        endVertexId = v.id;
-      }
-      return { ...l, points: pts, startVertexId, endVertexId };
-    });
 
-    const newObjects: DiagramObject[] = [...objects, ...newShapes, ...snapped, ...vertexObjs];
+    const newObjects: DiagramObject[] = [...objects, ...newShapes, ...finalLines];
     setObjects(newObjects);
     clearStrokes();
     setMode("edit");
@@ -128,7 +151,7 @@ export function Toolbar({
       loadState({ objects: p.objects, strokes: p.strokes, mode: "edit" });
       setProjectName(p.name);
     }
-    setShowSavedList(false);
+    setOpenMenu(null);
   };
 
   const handleImport = async (ev: React.ChangeEvent<HTMLInputElement>) => {
@@ -142,113 +165,111 @@ export function Toolbar({
       alert("Could not import file: " + String(e));
     }
     ev.target.value = "";
+    setOpenMenu(null);
   };
 
   const saved = listProjects();
+  const canUndo = past.length > 0;
+  const canRedo = future.length > 0;
+
+  const setOrToggle = (id: typeof openMenu) => {
+    setOpenMenu((prev) => (prev === id ? null : id));
+  };
 
   return (
-    <div className="toolbar">
-      <div className="brand">
-        <span className="brand-mark">∫</span>
-        <span>FeynSketch</span>
-      </div>
+    <>
+      <div className="menubar" ref={menuBarRef}>
+        <div className="brand">
+          <span className="brand-mark">∫</span>
+          <span>FeynSketch</span>
+        </div>
 
-      <input
-        className="text project-name"
-        value={projectName}
-        onChange={(e) => setProjectName(e.target.value)}
-      />
-
-      <div className="divider" />
-
-      <div className="seg">
-        <button
-          className={`seg-btn ${mode === "draw" ? "active" : ""}`}
-          onClick={() => setMode("draw")}
-        >
-          Draw
-        </button>
-        <button
-          className={`seg-btn ${mode === "edit" ? "active" : ""}`}
-          onClick={() => setMode("edit")}
-        >
-          Edit
-        </button>
-      </div>
-
-      <button
-        className={`btn ${settings.snap ? "active" : ""}`}
-        title="Snap new objects and dragging to the background grid"
-        onClick={() => setSettings({ snap: !settings.snap })}
-      >
-        {settings.snap ? "Snap: on" : "Snap: off"}
-      </button>
-
-      {mode === "draw" && (
-        <>
-          <button className="btn primary" onClick={convert}>
-            Convert → editable
-          </button>
-          <button className="btn" onClick={clearStrokes}>
-            Clear strokes
-          </button>
-        </>
-      )}
-
-      {mode === "edit" && (
-        <>
-          <button
-            className={`btn ${tool === "line" ? "active" : ""}`}
-            onClick={() => setTool(tool === "line" ? "select" : "line")}
+        <div className="menubar-menus">
+          <Menu
+            label="File"
+            open={openMenu === "file"}
+            onToggle={() => setOrToggle("file")}
           >
-            Draw line
-          </button>
-          <button
-            className={`btn ${tool === "vertex" ? "active" : ""}`}
-            onClick={() => setTool(tool === "vertex" ? "select" : "vertex")}
-          >
-            Vertex
-          </button>
-          <div className="dropdown">
-            <button
-              className={`btn ${tool === "shape" ? "active" : ""}`}
-              onClick={() => setShowShapes((v) => !v)}
+            <MenuItem
+              onClick={() => {
+                if (objects.length > 0 || strokes.length > 0) {
+                  if (!window.confirm("Discard the current diagram and start a new one?")) return;
+                }
+                reset();
+                setProjectName("Untitled");
+                setOpenMenu(null);
+              }}
             >
-              Shape ▾
-            </button>
-            {showShapes && (
-              <div className="dropdown-menu">
-                {(["circle", "ellipse", "square", "rect", "triangle", "diamond"] as ShapeKind[]).map((s) => (
-                  <button
-                    key={s}
-                    className="dropdown-item"
-                    onClick={() => {
-                      setPendingShape(s);
-                      setTool("shape");
-                      setShowShapes(false);
-                    }}
-                  >
-                    {s}
-                  </button>
-                ))}
+              New <Kbd>blank</Kbd>
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                handleSave();
+                setOpenMenu(null);
+              }}
+            >
+              Save project
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setShowExport(true);
+                setOpenMenu(null);
+              }}
+            >
+              Export…
+            </MenuItem>
+            <MenuDivider />
+            <MenuLabel>Saved projects</MenuLabel>
+            {saved.length === 0 && <MenuEmpty>No saved projects yet</MenuEmpty>}
+            {saved.map((p) => (
+              <div key={p.name} className="dropdown-row">
+                <button className="dropdown-item grow" onClick={() => handleLoad(p.name)}>
+                  {p.name}
+                  <span className="dim"> · {new Date(p.savedAt).toLocaleString()}</span>
+                </button>
+                <button
+                  className="dropdown-item mini danger"
+                  onClick={() => {
+                    deleteProject(p.name);
+                    setOpenMenu(null);
+                  }}
+                  title="Delete this saved project"
+                >
+                  ✕
+                </button>
               </div>
-            )}
-          </div>
-          <button className="btn" onClick={onShowLabel}>
-            LaTeX label
-          </button>
-        </>
-      )}
+            ))}
+            <MenuDivider />
+            <label className="dropdown-item">
+              Import project file…
+              <input type="file" accept="application/json,.json" onChange={handleImport} hidden />
+            </label>
+          </Menu>
 
-      <div className="spacer" />
-
-      <div className="dropdown">
-        <button className="btn" onClick={() => setShowSettings((v) => !v)}>
-          Settings ▾
-        </button>
-        {showSettings && (
-          <div className="dropdown-menu wide">
-            <div className="dropdown-header">Settings</div>
+          <Menu
+            label="Edit"
+            open={openMenu === "edit"}
+            onToggle={() => setOrToggle("edit")}
+          >
+            <MenuItem
+              disabled={!canUndo}
+              onClick={() => {
+                undo();
+                setOpenMenu(null);
+              }}
+            >
+              Undo <Kbd>⌘Z</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!canRedo}
+              onClick={() => {
+                redo();
+                setOpenMenu(null);
+              }}
+            >
+              Redo <Kbd>⇧⌘Z</Kbd>
+            </MenuItem>
+            <MenuDivider />
             <label className="dropdown-item check-item">
               <input
                 type="checkbox"
@@ -277,54 +298,187 @@ export function Toolbar({
               />
               <span className="dim">{settings.gridSize}px</span>
             </div>
-          </div>
-        )}
-      </div>
+          </Menu>
 
-      <div className="dropdown">
-        <button className="btn" onClick={() => setShowSavedList((v) => !v)}>
-          Projects ▾
-        </button>
-        {showSavedList && (
-          <div className="dropdown-menu wide">
-            <div className="dropdown-header">Saved projects</div>
-            {saved.length === 0 && <div className="dropdown-empty">No saved projects yet</div>}
-            {saved.map((p) => (
-              <div key={p.name} className="dropdown-row">
-                <button className="dropdown-item grow" onClick={() => handleLoad(p.name)}>
-                  {p.name}
-                  <span className="dim"> · {new Date(p.savedAt).toLocaleString()}</span>
-                </button>
-                <button
-                  className="dropdown-item mini danger"
-                  onClick={() => {
-                    deleteProject(p.name);
-                    setShowSavedList(false);
-                  }}
-                >
-                  ✕
-                </button>
+          {mode === "edit" && (
+            <Menu
+              label="Insert"
+              open={openMenu === "insert"}
+              onToggle={() => setOrToggle("insert")}
+            >
+              <MenuItem
+                onClick={() => {
+                  setTool("line");
+                  setOpenMenu(null);
+                }}
+              >
+                Line
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setTool("vertex");
+                  setOpenMenu(null);
+                }}
+              >
+                Vertex
+              </MenuItem>
+              <MenuLabel>Shapes</MenuLabel>
+              <div className="shape-grid">
+                {(["circle", "ellipse", "square", "rect", "triangle", "diamond"] as ShapeKind[]).map((s) => (
+                  <button
+                    key={s}
+                    className="chip"
+                    onClick={() => {
+                      setPendingShape(s);
+                      setTool("shape");
+                      setOpenMenu(null);
+                    }}
+                  >
+                    {s}
+                  </button>
+                ))}
               </div>
-            ))}
-            <div className="dropdown-divider" />
-            <label className="dropdown-item">
-              Import project file…
-              <input type="file" accept="application/json,.json" onChange={handleImport} hidden />
-            </label>
-            <button className="dropdown-item" onClick={() => { reset(); setShowSavedList(false); }}>
-              New blank project
-            </button>
-          </div>
-        )}
+              <MenuDivider />
+              <MenuItem
+                onClick={() => {
+                  onShowLabel();
+                  setOpenMenu(null);
+                }}
+              >
+                LaTeX label
+              </MenuItem>
+            </Menu>
+          )}
+        </div>
+
+        <input
+          className="text project-name"
+          value={projectName}
+          onChange={(e) => setProjectName(e.target.value)}
+          aria-label="Project name"
+        />
+
+        <div className="spacer" />
+
+        <div className="iconbar">
+          <button
+            className="icon-btn"
+            disabled={!canUndo}
+            onClick={undo}
+            title="Undo (⌘Z)"
+            aria-label="Undo"
+          >
+            ↶
+          </button>
+          <button
+            className="icon-btn"
+            disabled={!canRedo}
+            onClick={redo}
+            title="Redo (⇧⌘Z)"
+            aria-label="Redo"
+          >
+            ↷
+          </button>
+        </div>
+
+        <button
+          className={`btn ${settings.snap ? "active" : ""}`}
+          title="Snap new objects and dragging to the background grid"
+          onClick={() => setSettings({ snap: !settings.snap })}
+        >
+          Snap {settings.snap ? "on" : "off"}
+        </button>
+
+        <button className="btn" onClick={handleSave} title="Save project to your browser">
+          Save
+        </button>
+        <button className="btn primary" onClick={() => setShowExport(true)}>
+          Export…
+        </button>
       </div>
 
-      <button className="btn" onClick={handleSave}>
-        Save
-      </button>
+      <div className="toolstrip">
+        <div className="seg">
+          <button
+            className={`seg-btn ${mode === "draw" ? "active" : ""}`}
+            onClick={() => setMode("draw")}
+          >
+            Draw
+          </button>
+          <button
+            className={`seg-btn ${mode === "edit" ? "active" : ""}`}
+            onClick={() => setMode("edit")}
+          >
+            Edit
+          </button>
+        </div>
 
-      <button className="btn primary" onClick={() => setShowExport(true)}>
-        Export…
-      </button>
+        {mode === "draw" && (
+          <>
+            <button className="btn primary" onClick={convert}>
+              Convert → editable
+            </button>
+            <button className="btn" onClick={clearStrokes}>
+              Clear strokes
+            </button>
+            <span className="hint">
+              Sketch your diagram freely — straight bits become straight, photons become wiggly,
+              gluons become curly, and runs of dashes are detected automatically.
+            </span>
+          </>
+        )}
+
+        {mode === "edit" && (
+          <>
+            <button
+              className={`btn ${tool === "select" ? "active" : ""}`}
+              onClick={() => setTool("select")}
+            >
+              Select
+            </button>
+            <button
+              className={`btn ${tool === "line" ? "active" : ""}`}
+              onClick={() => setTool(tool === "line" ? "select" : "line")}
+            >
+              Line
+            </button>
+            <button
+              className={`btn ${tool === "vertex" ? "active" : ""}`}
+              onClick={() => setTool(tool === "vertex" ? "select" : "vertex")}
+            >
+              Vertex
+            </button>
+            <div className="dropdown" data-menu-region>
+              <button
+                className={`btn ${tool === "shape" ? "active" : ""}`}
+                onClick={() => setOrToggle("shapes")}
+              >
+                Shape ▾
+              </button>
+              {openMenu === "shapes" && (
+                <div className="dropdown-menu" data-menu-region>
+                  {(["circle", "ellipse", "square", "rect", "triangle", "diamond"] as ShapeKind[]).map((s) => (
+                    <button
+                      key={s}
+                      className="dropdown-item"
+                      onClick={() => {
+                        setPendingShape(s);
+                        setTool("shape");
+                        setOpenMenu(null);
+                      }}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button className="btn" onClick={onShowLabel}>
+              LaTeX label
+            </button>
+          </>
+        )}
+      </div>
 
       <ExportDialog
         open={showExport}
@@ -348,6 +502,73 @@ export function Toolbar({
           setShowExport(false);
         }}
       />
+    </>
+  );
+}
+
+function Menu({
+  label,
+  open,
+  onToggle,
+  children,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="dropdown menu-slot" data-menu-region>
+      <button
+        className={`menu-trigger ${open ? "open" : ""}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+      >
+        {label}
+      </button>
+      {open && (
+        <div className="dropdown-menu wide" data-menu-region>
+          {children}
+        </div>
+      )}
     </div>
   );
+}
+
+function MenuItem({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      className={`dropdown-item${disabled ? " disabled" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MenuLabel({ children }: { children: React.ReactNode }) {
+  return <div className="dropdown-header">{children}</div>;
+}
+
+function MenuEmpty({ children }: { children: React.ReactNode }) {
+  return <div className="dropdown-empty">{children}</div>;
+}
+
+function MenuDivider() {
+  return <div className="dropdown-divider" />;
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return <span className="kbd">{children}</span>;
 }

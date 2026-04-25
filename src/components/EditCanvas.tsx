@@ -76,6 +76,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
   const setTool = useStore((s) => s.setTool);
   const setPendingShape = useStore((s) => s.setPendingShape);
   const settings = useStore((s) => s.settings);
+  const pushHistory = useStore((s) => s.pushHistory);
 
   const [drag, setDrag] = useState<Drag>(null);
   const tempPath = useRef<SVGPathElement>(null);
@@ -115,6 +116,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
     const originals = new Map<string, DiagramObject>();
     for (const o of objects) if (ids.includes(o.id)) originals.set(o.id, o);
     svg.setPointerCapture(e.pointerId);
+    pushHistory();
     setDrag({ kind: "object", ids, start: toLocal(e, svg), originals });
   };
 
@@ -123,6 +125,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
     const svg = rootSvg();
     if (!svg) return;
     svg.setPointerCapture(e.pointerId);
+    pushHistory();
     setDrag({ kind: "anchor", id, index });
   };
 
@@ -137,6 +140,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
     const svg = rootSvg();
     if (!svg) return;
     svg.setPointerCapture(e.pointerId);
+    pushHistory();
     setDrag({ kind: "shape-resize", id, handle, origW: obj.width, origH: obj.height });
   };
 
