@@ -7,19 +7,66 @@ import { VertexRenderer } from "./VertexRenderer";
 import { LatexLabel } from "./LatexLabel";
 
 type Drag =
-  | { kind: "object"; id: string; start: Point; original: DiagramObject }
+  | { kind: "object"; ids: string[]; start: Point; originals: Map<string, DiagramObject> }
   | { kind: "anchor"; id: string; index: number }
   | { kind: "shape-resize"; id: string; handle: "nw" | "ne" | "sw" | "se"; origW: number; origH: number }
   | { kind: "new-line"; points: Point[] }
+  | { kind: "marquee"; start: Point; end: Point; additive: boolean }
   | null;
+
+function snapPt(p: Point, snap: boolean, grid: number): Point {
+  if (!snap) return p;
+  return { x: Math.round(p.x / grid) * grid, y: Math.round(p.y / grid) * grid };
+}
+
+function snapDelta(dx: number, dy: number, snap: boolean, grid: number): { dx: number; dy: number } {
+  if (!snap) return { dx, dy };
+  return { dx: Math.round(dx / grid) * grid, dy: Math.round(dy / grid) * grid };
+}
+
+function referencePoint(o: DiagramObject): Point | null {
+  if (o.kind === "line") return o.points[0] ?? null;
+  if (o.kind === "shape" || o.kind === "vertex" || o.kind === "label") return { x: o.x, y: o.y };
+  return null;
+}
+
+function objectBox(o: DiagramObject): { minX: number; minY: number; maxX: number; maxY: number } {
+  if (o.kind === "line") {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of o.points) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, minY, maxX, maxY };
+  }
+  if (o.kind === "shape") {
+    return { minX: o.x - o.width / 2, minY: o.y - o.height / 2, maxX: o.x + o.width / 2, maxY: o.y + o.height / 2 };
+  }
+  if (o.kind === "vertex") {
+    return { minX: o.x - o.size, minY: o.y - o.size, maxX: o.x + o.size, maxY: o.y + o.size };
+  }
+  // label
+  return { minX: o.x, minY: o.y, maxX: o.x + 60, maxY: o.y + 24 };
+}
+
+function rectsOverlap(
+  a: { minX: number; minY: number; maxX: number; maxY: number },
+  b: { minX: number; minY: number; maxX: number; maxY: number }
+) {
+  return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
+}
 
 export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: number }>(function EditCanvas(
   { width, height },
   ref
 ) {
   const objects = useStore((s) => s.objects);
-  const selectedId = useStore((s) => s.selectedId);
+  const selectedIds = useStore((s) => s.selectedIds);
   const select = useStore((s) => s.select);
+  const setSelection = useStore((s) => s.setSelection);
+  const toggleSelection = useStore((s) => s.toggleSelection);
   const updateObject = useStore((s) => s.updateObject);
   const tool = useStore((s) => s.tool);
   const addLine = useStore((s) => s.addLine);
@@ -28,9 +75,12 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
   const pendingShape = useStore((s) => s.pendingShape);
   const setTool = useStore((s) => s.setTool);
   const setPendingShape = useStore((s) => s.setPendingShape);
+  const settings = useStore((s) => s.settings);
 
   const [drag, setDrag] = useState<Drag>(null);
   const tempPath = useRef<SVGPathElement>(null);
+
+  const selectedSet = new Set(selectedIds);
 
   const toLocal = (e: React.PointerEvent, svg: SVGSVGElement): Point => {
     const rect = svg.getBoundingClientRect();
@@ -42,13 +92,30 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
 
   const startObjectDrag = (id: string, e: React.PointerEvent) => {
     e.stopPropagation();
-    const obj = objects.find((o) => o.id === id);
-    if (!obj) return;
-    select(id);
     const svg = rootSvg();
     if (!svg) return;
+
+    let ids: string[];
+    if (e.shiftKey) {
+      if (selectedSet.has(id)) {
+        // Shift-click on already-selected: just deselect, don't drag.
+        toggleSelection(id);
+        return;
+      }
+      // Shift-click on unselected: add to selection and start dragging the whole group.
+      ids = [...selectedIds, id];
+      toggleSelection(id);
+    } else if (selectedSet.has(id)) {
+      ids = selectedIds.slice();
+    } else {
+      ids = [id];
+      select(id);
+    }
+    if (ids.length === 0) return;
+    const originals = new Map<string, DiagramObject>();
+    for (const o of objects) if (ids.includes(o.id)) originals.set(o.id, o);
     svg.setPointerCapture(e.pointerId);
-    setDrag({ kind: "object", id, start: toLocal(e, svg), original: obj });
+    setDrag({ kind: "object", ids, start: toLocal(e, svg), originals });
   };
 
   const startAnchorDrag = (id: string, index: number, e: React.PointerEvent) => {
@@ -76,24 +143,28 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
   const onPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
     const svg = e.currentTarget;
     const p = toLocal(e, svg);
+    const sp = snapPt(p, settings.snap, settings.gridSize);
+
     if (tool === "vertex") {
-      addVertex(p.x, p.y);
+      addVertex(sp.x, sp.y);
       setTool("select");
       return;
     }
     if (tool === "shape" && pendingShape) {
-      addShape(pendingShape, p.x, p.y);
+      addShape(pendingShape, sp.x, sp.y);
       setTool("select");
       setPendingShape(null);
       return;
     }
     if (tool === "line") {
       svg.setPointerCapture(e.pointerId);
-      setDrag({ kind: "new-line", points: [p] });
+      setDrag({ kind: "new-line", points: [sp] });
       return;
     }
-    // click on empty area -> clear selection
-    select(null);
+    // Empty area click in select tool: start marquee
+    svg.setPointerCapture(e.pointerId);
+    setDrag({ kind: "marquee", start: p, end: p, additive: e.shiftKey });
+    if (!e.shiftKey) select(null);
   };
 
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -102,32 +173,52 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
     const p = toLocal(e, svg);
 
     if (drag.kind === "object") {
-      const dx = p.x - drag.start.x;
-      const dy = p.y - drag.start.y;
-      const obj = drag.original;
-      if (obj.kind === "line") {
-        updateObject(obj.id, { points: obj.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) });
-      } else if (obj.kind === "shape" || obj.kind === "vertex" || obj.kind === "label") {
-        updateObject(obj.id, { x: obj.x + dx, y: obj.y + dy });
+      let dx = p.x - drag.start.x;
+      let dy = p.y - drag.start.y;
+      if (settings.snap) {
+        // Snap so the first object's reference point lands on a grid intersection,
+        // then apply the same delta to the rest so relative positions are preserved.
+        const ref = drag.originals.get(drag.ids[0]);
+        const refPt = ref ? referencePoint(ref) : null;
+        if (refPt) {
+          const target = snapPt({ x: refPt.x + dx, y: refPt.y + dy }, true, settings.gridSize);
+          dx = target.x - refPt.x;
+          dy = target.y - refPt.y;
+        } else {
+          const snapped = snapDelta(dx, dy, true, settings.gridSize);
+          dx = snapped.dx;
+          dy = snapped.dy;
+        }
+      }
+      for (const id of drag.ids) {
+        const obj = drag.originals.get(id);
+        if (!obj) continue;
+        if (obj.kind === "line") {
+          updateObject(obj.id, { points: obj.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) });
+        } else if (obj.kind === "shape" || obj.kind === "vertex" || obj.kind === "label") {
+          updateObject(obj.id, { x: obj.x + dx, y: obj.y + dy });
+        }
       }
     } else if (drag.kind === "anchor") {
       const obj = objects.find((o) => o.id === drag.id);
       if (!obj || obj.kind !== "line") return;
       const pts = obj.points.slice();
-      pts[drag.index] = p;
+      pts[drag.index] = snapPt(p, settings.snap, settings.gridSize);
       updateObject(obj.id, { points: pts });
     } else if (drag.kind === "shape-resize") {
       const obj = objects.find((o) => o.id === drag.id);
       if (!obj || obj.kind !== "shape") return;
-      const dx = p.x - obj.x;
-      const dy = p.y - obj.y;
+      const sp = snapPt(p, settings.snap, settings.gridSize);
+      const dx = sp.x - obj.x;
+      const dy = sp.y - obj.y;
       const w = Math.max(10, Math.abs(dx) * 2);
       const h = Math.max(10, Math.abs(dy) * 2);
       updateObject(drag.id, { width: w, height: h });
     } else if (drag.kind === "new-line") {
+      const sp = snapPt(p, settings.snap, settings.gridSize);
       const last = drag.points[drag.points.length - 1];
-      if (!last || Math.hypot(p.x - last.x, p.y - last.y) > 2) {
-        const next = [...drag.points, p];
+      if (!last || Math.hypot(sp.x - last.x, sp.y - last.y) > 2) {
+        const next = [...drag.points, sp];
         setDrag({ kind: "new-line", points: next });
         if (tempPath.current) {
           const d =
@@ -139,6 +230,8 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
           tempPath.current.setAttribute("d", d);
         }
       }
+    } else if (drag.kind === "marquee") {
+      setDrag({ ...drag, end: p });
     }
   };
 
@@ -149,19 +242,37 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
     } catch {
       /* ignore */
     }
-    if (drag.kind === "new-line" && drag.points.length >= 2) {
-      addLine(drag.points, "solid");
-      setTool("select");
+    if (drag.kind === "new-line") {
+      if (drag.points.length >= 2) {
+        addLine(drag.points, "solid");
+        setTool("select");
+      }
       if (tempPath.current) tempPath.current.setAttribute("d", "");
+    } else if (drag.kind === "marquee") {
+      const r = {
+        minX: Math.min(drag.start.x, drag.end.x),
+        minY: Math.min(drag.start.y, drag.end.y),
+        maxX: Math.max(drag.start.x, drag.end.x),
+        maxY: Math.max(drag.start.y, drag.end.y),
+      };
+      const dragged = Math.hypot(drag.end.x - drag.start.x, drag.end.y - drag.start.y) > 4;
+      if (dragged) {
+        const hits = objects.filter((o) => rectsOverlap(objectBox(o), r)).map((o) => o.id);
+        if (drag.additive) {
+          const merged = Array.from(new Set([...selectedIds, ...hits]));
+          setSelection(merged);
+        } else {
+          setSelection(hits);
+        }
+      }
     }
     setDrag(null);
   };
 
   const onDoubleClick = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!selectedId) return;
-    const selected = objects.find((o) => o.id === selectedId);
+    if (selectedIds.length !== 1) return;
+    const selected = objects.find((o) => o.id === selectedIds[0]);
     if (!selected || selected.kind !== "line") return;
-    // add anchor at click position, inserted at nearest segment
     const svg = e.currentTarget;
     const rect = svg.getBoundingClientRect();
     const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -187,6 +298,16 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
     updateObject(selected.id, { points: next });
   };
 
+  const marquee =
+    drag?.kind === "marquee"
+      ? {
+          x: Math.min(drag.start.x, drag.end.x),
+          y: Math.min(drag.start.y, drag.end.y),
+          w: Math.abs(drag.end.x - drag.start.x),
+          h: Math.abs(drag.end.y - drag.start.y),
+        }
+      : null;
+
   return (
     <svg
       ref={ref}
@@ -201,14 +322,19 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
       style={{ touchAction: "none", background: "#ffffff" }}
     >
       <defs>
-        <pattern id="edit-grid" width="20" height="20" patternUnits="userSpaceOnUse">
-          <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#f1f1f1" strokeWidth="1" />
+        <pattern id="edit-grid" width={settings.gridSize} height={settings.gridSize} patternUnits="userSpaceOnUse">
+          <path d={`M ${settings.gridSize} 0 L 0 0 0 ${settings.gridSize}`} fill="none" stroke="#f1f1f1" strokeWidth="1" />
         </pattern>
+        {settings.snap && (
+          <pattern id="edit-grid-dots" width={settings.gridSize} height={settings.gridSize} patternUnits="userSpaceOnUse">
+            <circle cx={0} cy={0} r={1.2} fill="#cfd6e2" />
+          </pattern>
+        )}
       </defs>
-      <rect data-editor-only width={width} height={height} fill="url(#edit-grid)" />
+      <rect data-editor-only width={width} height={height} fill={settings.snap ? "url(#edit-grid-dots)" : "url(#edit-grid)"} />
 
       {objects.map((obj) => {
-        const selected = selectedId === obj.id;
+        const selected = selectedSet.has(obj.id);
         const onDown = (e: React.PointerEvent) => startObjectDrag(obj.id, e);
         if (obj.kind === "line")
           return (
@@ -245,6 +371,20 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
           strokeWidth={2}
           strokeLinecap="round"
           strokeDasharray="4 4"
+        />
+      )}
+
+      {marquee && (
+        <rect
+          data-editor-only
+          x={marquee.x}
+          y={marquee.y}
+          width={marquee.w}
+          height={marquee.h}
+          fill="rgba(43, 108, 176, 0.08)"
+          stroke="#2b6cb0"
+          strokeDasharray="4 3"
+          strokeWidth={1}
         />
       )}
     </svg>

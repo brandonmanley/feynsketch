@@ -81,11 +81,18 @@ export interface Stroke {
   points: Point[];
 }
 
+export interface Settings {
+  snap: boolean;
+  gridSize: number;
+  confirmDelete: boolean;
+}
+
 export interface DiagramState {
   mode: Mode;
   objects: DiagramObject[];
   strokes: Stroke[];
-  selectedId: string | null;
+  selectedIds: string[];
   tool: Tool;
   pendingShape: ShapeKind | null;
+  settings: Settings;
 }

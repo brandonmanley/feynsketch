@@ -2,9 +2,14 @@ import { useRef } from "react";
 import { useStore, uid } from "../store";
 import type { Point, Stroke } from "../types";
 import { pathFromPoints } from "../lib/geometry";
+import { LineRenderer } from "./LineRenderer";
+import { ShapeRenderer } from "./ShapeRenderer";
+import { VertexRenderer } from "./VertexRenderer";
+import { LatexLabel } from "./LatexLabel";
 
 export function DrawLayer({ width, height }: { width: number; height: number }) {
   const strokes = useStore((s) => s.strokes);
+  const objects = useStore((s) => s.objects);
   const addStroke = useStore((s) => s.addStroke);
   const current = useRef<Point[]>([]);
   const drawing = useRef(false);
@@ -61,6 +66,19 @@ export function DrawLayer({ width, height }: { width: number; height: number }) 
         </pattern>
       </defs>
       <rect width={width} height={height} fill="url(#grid)" />
+
+      {/* Already-converted editable objects shown beneath the live strokes,
+          so the user can continue adding to a partially-edited diagram. */}
+      <g opacity={0.85} style={{ pointerEvents: "none" }}>
+        {objects.map((obj) => {
+          if (obj.kind === "line") return <LineRenderer key={obj.id} line={obj} />;
+          if (obj.kind === "shape") return <ShapeRenderer key={obj.id} shape={obj} />;
+          if (obj.kind === "vertex") return <VertexRenderer key={obj.id} vertex={obj} />;
+          if (obj.kind === "label") return <LatexLabel key={obj.id} label={obj} />;
+          return null;
+        })}
+      </g>
+
       {strokes.map((s) => (
         <path
           key={s.id}

@@ -446,3 +446,48 @@ body {
   flex-wrap: wrap;
   margin-top: 8px;
 }
+
+.form-row {
+  margin-top: 12px;
+}
+.form-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.text.full {
+  width: 100%;
+}
+.grid.four {
+  grid-template-columns: repeat(4, 1fr);
+}
+.grid.five {
+  grid-template-columns: repeat(5, 1fr);
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.check-item {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+.slider-item {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+.slider-item span {
+  font-size: 12px;
+}
+.slider-item input[type="range"] {
+  flex: 1;
+}

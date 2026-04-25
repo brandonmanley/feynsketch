@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useStore } from "../store";
 import { classifyStroke, mergeEndpointsToVertices } from "../lib/strokeAnalysis";
-import type { DiagramObject, ShapeKind, VertexObject, LineObject, Point } from "../types";
+import type { DiagramObject, ShapeKind, ShapeObject, VertexObject, LineObject, Point } from "../types";
 import { uid } from "../store";
-import { downloadPdf, downloadPng, downloadSvg } from "../lib/exporters";
+import { performExport } from "../lib/exporters";
+import { ExportDialog } from "./ExportDialog";
 import {
   deleteProject,
   exportProjectFile,
@@ -16,9 +17,13 @@ import {
 export function Toolbar({
   onShowLabel,
   getSvg,
+  projectName,
+  setProjectName,
 }: {
   onShowLabel: () => void;
   getSvg: () => SVGSVGElement | null;
+  projectName: string;
+  setProjectName: (n: string) => void;
 }) {
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
@@ -31,35 +36,54 @@ export function Toolbar({
   const setPendingShape = useStore((s) => s.setPendingShape);
   const loadState = useStore((s) => s.loadState);
   const reset = useStore((s) => s.reset);
+  const settings = useStore((s) => s.settings);
+  const setSettings = useStore((s) => s.setSettings);
 
-  const [projectName, setProjectName] = useState("My diagram");
   const [showExport, setShowExport] = useState(false);
   const [showSavedList, setShowSavedList] = useState(false);
   const [showShapes, setShowShapes] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const convert = () => {
     if (strokes.length === 0) {
       setMode("edit");
       return;
     }
-    // Classify each stroke into a line
-    const lines: LineObject[] = strokes.map((s) => {
+    const newLines: LineObject[] = [];
+    const newShapes: ShapeObject[] = [];
+    for (const s of strokes) {
       const c = classifyStroke(s);
-      return {
-        id: uid("ln"),
-        kind: "line",
-        points: c.controlPoints,
-        style: c.style,
-        arrow: "none",
-        color: "#111111",
-        strokeWidth: 2,
-        amplitude: c.amplitude,
-        wavelength: c.wavelength,
-      };
-    });
-    // Merge close endpoints into shared vertices
+      if (c.kind === "shape") {
+        newShapes.push({
+          id: uid("shp"),
+          kind: "shape",
+          shape: c.shape,
+          x: c.cx,
+          y: c.cy,
+          width: c.width,
+          height: c.height,
+          rotation: 0,
+          fill: "transparent",
+          stroke: "#111111",
+          strokeWidth: 2,
+        });
+      } else {
+        newLines.push({
+          id: uid("ln"),
+          kind: "line",
+          points: c.controlPoints,
+          style: c.style,
+          arrow: "none",
+          color: "#111111",
+          strokeWidth: 2,
+          amplitude: c.amplitude,
+          wavelength: c.wavelength,
+        });
+      }
+    }
+    // Merge near-by line endpoints into shared vertices.
     const { vertices: vpts, map } = mergeEndpointsToVertices(
-      lines.map((l) => ({ id: l.id, points: l.points })),
+      newLines.map((l) => ({ id: l.id, points: l.points })),
       18
     );
     const vertexObjs: VertexObject[] = vpts.map((p) => ({
@@ -72,8 +96,7 @@ export function Toolbar({
       color: "#111111",
       size: 5,
     }));
-    // Snap line endpoints to the merged vertex positions and record connections
-    const snapped: LineObject[] = lines.map((l) => {
+    const snapped: LineObject[] = newLines.map((l) => {
       const m = map[l.id];
       let pts = l.points.slice();
       let startVertexId: string | undefined;
@@ -91,28 +114,13 @@ export function Toolbar({
       return { ...l, points: pts, startVertexId, endVertexId };
     });
 
-    const newObjects: DiagramObject[] = [...objects, ...snapped, ...vertexObjs];
+    const newObjects: DiagramObject[] = [...objects, ...newShapes, ...snapped, ...vertexObjs];
     setObjects(newObjects);
     clearStrokes();
     setMode("edit");
   };
 
-  const handleExport = async (kind: "svg" | "png" | "pdf" | "json") => {
-    const svg = getSvg();
-    if (kind === "json") {
-      exportProjectFile(projectName || "diagram", { objects, strokes });
-      return;
-    }
-    if (!svg) return;
-    if (kind === "svg") downloadSvg(svg, `${projectName || "diagram"}.svg`);
-    if (kind === "png") await downloadPng(svg, `${projectName || "diagram"}.png`, 2);
-    if (kind === "pdf") await downloadPdf(svg, `${projectName || "diagram"}.pdf`, 2);
-    setShowExport(false);
-  };
-
-  const handleSave = () => {
-    saveProject(projectName || "Untitled", { objects, strokes });
-  };
+  const handleSave = () => saveProject(projectName || "Untitled", { objects, strokes });
 
   const handleLoad = (name: string) => {
     const p = loadProject(name);
@@ -167,6 +175,14 @@ export function Toolbar({
           Edit
         </button>
       </div>
+
+      <button
+        className={`btn ${settings.snap ? "active" : ""}`}
+        title="Snap new objects and dragging to the background grid"
+        onClick={() => setSettings({ snap: !settings.snap })}
+      >
+        {settings.snap ? "Snap: on" : "Snap: off"}
+      </button>
 
       {mode === "draw" && (
         <>
@@ -227,6 +243,45 @@ export function Toolbar({
       <div className="spacer" />
 
       <div className="dropdown">
+        <button className="btn" onClick={() => setShowSettings((v) => !v)}>
+          Settings ▾
+        </button>
+        {showSettings && (
+          <div className="dropdown-menu wide">
+            <div className="dropdown-header">Settings</div>
+            <label className="dropdown-item check-item">
+              <input
+                type="checkbox"
+                checked={settings.snap}
+                onChange={(e) => setSettings({ snap: e.target.checked })}
+              />
+              Snap to grid
+            </label>
+            <label className="dropdown-item check-item">
+              <input
+                type="checkbox"
+                checked={settings.confirmDelete}
+                onChange={(e) => setSettings({ confirmDelete: e.target.checked })}
+              />
+              Confirm before delete
+            </label>
+            <div className="dropdown-item slider-item">
+              <span>Grid size</span>
+              <input
+                type="range"
+                min={8}
+                max={60}
+                step={1}
+                value={settings.gridSize}
+                onChange={(e) => setSettings({ gridSize: Number(e.target.value) })}
+              />
+              <span className="dim">{settings.gridSize}px</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="dropdown">
         <button className="btn" onClick={() => setShowSavedList((v) => !v)}>
           Projects ▾
         </button>
@@ -267,27 +322,32 @@ export function Toolbar({
         Save
       </button>
 
-      <div className="dropdown">
-        <button className="btn primary" onClick={() => setShowExport((v) => !v)}>
-          Export ▾
-        </button>
-        {showExport && (
-          <div className="dropdown-menu">
-            <button className="dropdown-item" onClick={() => handleExport("svg")}>
-              SVG (vector)
-            </button>
-            <button className="dropdown-item" onClick={() => handleExport("png")}>
-              PNG (raster)
-            </button>
-            <button className="dropdown-item" onClick={() => handleExport("pdf")}>
-              PDF
-            </button>
-            <button className="dropdown-item" onClick={() => handleExport("json")}>
-              Project JSON
-            </button>
-          </div>
-        )}
-      </div>
+      <button className="btn primary" onClick={() => setShowExport(true)}>
+        Export…
+      </button>
+
+      <ExportDialog
+        open={showExport}
+        defaultName={projectName || "diagram"}
+        onClose={() => setShowExport(false)}
+        onSubmit={async (v) => {
+          try {
+            if (v.format === "json") {
+              exportProjectFile(v.filename, { objects, strokes });
+            } else {
+              await performExport(getSvg(), {
+                filename: v.filename,
+                format: v.format,
+                dpi: v.dpi,
+                transparent: v.transparent,
+              });
+            }
+          } catch (e) {
+            alert("Export failed: " + String(e));
+          }
+          setShowExport(false);
+        }}
+      />
     </div>
   );
 }

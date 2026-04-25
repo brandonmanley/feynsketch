@@ -4,6 +4,7 @@ import type {
   DiagramState,
   LineObject,
   Mode,
+  Settings,
   ShapeKind,
   ShapeObject,
   Stroke,
@@ -20,6 +21,33 @@ import type {
 let idCounter = 1;
 export const uid = (prefix = "o") => `${prefix}_${Date.now().toString(36)}_${(idCounter++).toString(36)}`;
 
+const SETTINGS_KEY = "feynsketch:settings";
+
+function loadSettings(): Settings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        snap: !!parsed.snap,
+        gridSize: typeof parsed.gridSize === "number" ? parsed.gridSize : 20,
+        confirmDelete: parsed.confirmDelete ?? true,
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { snap: false, gridSize: 20, confirmDelete: true };
+}
+
+function persistSettings(s: Settings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+  } catch {
+    /* ignore */
+  }
+}
+
 interface Actions {
   setMode: (mode: Mode) => void;
   setTool: (tool: Tool) => void;
@@ -31,19 +59,23 @@ interface Actions {
   setObjects: (objs: DiagramObject[]) => void;
   addObject: (obj: DiagramObject) => void;
   updateObject: (id: string, patch: Partial<DiagramObject>) => void;
+  updateMany: (ids: string[], patcher: (obj: DiagramObject) => Partial<DiagramObject>) => void;
   removeObject: (id: string) => void;
+  removeMany: (ids: string[]) => void;
   select: (id: string | null) => void;
+  setSelection: (ids: string[]) => void;
+  toggleSelection: (id: string) => void;
 
   addLabel: (latex: string, x: number, y: number) => LabelObject;
   addShape: (shape: ShapeKind, x: number, y: number) => ShapeObject;
   addVertex: (x: number, y: number) => VertexObject;
   addLine: (points: Point[], style?: LineStyle) => LineObject;
 
-  setLineStyle: (id: string, style: LineStyle) => void;
-  setArrow: (id: string, arrow: ArrowPosition) => void;
   setColor: (id: string, color: string) => void;
   setVertexShape: (id: string, shape: VertexShape) => void;
   setVertexFill: (id: string, fill: VertexFill) => void;
+
+  setSettings: (patch: Partial<Settings>) => void;
 
   loadState: (s: Partial<DiagramState>) => void;
   reset: () => void;
@@ -53,12 +85,13 @@ const initial: DiagramState = {
   mode: "draw",
   objects: [],
   strokes: [],
-  selectedId: null,
+  selectedIds: [],
   tool: "draw",
   pendingShape: null,
+  settings: loadSettings(),
 };
 
-export const useStore = create<DiagramState & Actions>((set) => ({
+export const useStore = create<DiagramState & Actions>((set, get) => ({
   ...initial,
 
   setMode: (mode) => set({ mode }),
@@ -69,17 +102,43 @@ export const useStore = create<DiagramState & Actions>((set) => ({
   clearStrokes: () => set({ strokes: [] }),
 
   setObjects: (objects) => set({ objects }),
-  addObject: (obj) => set((s) => ({ objects: [...s.objects, obj], selectedId: obj.id })),
+  addObject: (obj) => set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] })),
   updateObject: (id, patch) =>
     set((s) => ({
       objects: s.objects.map((o) => (o.id === id ? ({ ...o, ...patch } as DiagramObject) : o)),
     })),
+  updateMany: (ids, patcher) =>
+    set((s) => {
+      const set = new Set(ids);
+      return {
+        objects: s.objects.map((o) =>
+          set.has(o.id) ? ({ ...o, ...patcher(o) } as DiagramObject) : o
+        ),
+      };
+    }),
   removeObject: (id) =>
     set((s) => ({
       objects: s.objects.filter((o) => o.id !== id),
-      selectedId: s.selectedId === id ? null : s.selectedId,
+      selectedIds: s.selectedIds.filter((sid) => sid !== id),
     })),
-  select: (selectedId) => set({ selectedId }),
+  removeMany: (ids) =>
+    set((s) => {
+      const remove = new Set(ids);
+      return {
+        objects: s.objects.filter((o) => !remove.has(o.id)),
+        selectedIds: s.selectedIds.filter((sid) => !remove.has(sid)),
+      };
+    }),
+
+  select: (id) => set({ selectedIds: id ? [id] : [] }),
+  setSelection: (ids) => set({ selectedIds: ids }),
+  toggleSelection: (id) =>
+    set((s) => {
+      if (s.selectedIds.includes(id)) {
+        return { selectedIds: s.selectedIds.filter((x) => x !== id) };
+      }
+      return { selectedIds: [...s.selectedIds, id] };
+    }),
 
   addLabel: (latex, x, y) => {
     const obj: LabelObject = {
@@ -92,7 +151,7 @@ export const useStore = create<DiagramState & Actions>((set) => ({
       fontSize: 18,
       fontFamily: "KaTeX_Main, serif",
     };
-    set((s) => ({ objects: [...s.objects, obj], selectedId: obj.id }));
+    set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
     return obj;
   },
 
@@ -106,11 +165,11 @@ export const useStore = create<DiagramState & Actions>((set) => ({
       width: 80,
       height: 80,
       rotation: 0,
-      fill: "#ffffff",
+      fill: "transparent",
       stroke: "#111111",
       strokeWidth: 2,
     };
-    set((s) => ({ objects: [...s.objects, obj], selectedId: obj.id }));
+    set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
     return obj;
   },
 
@@ -125,7 +184,7 @@ export const useStore = create<DiagramState & Actions>((set) => ({
       color: "#111111",
       size: 8,
     };
-    set((s) => ({ objects: [...s.objects, obj], selectedId: obj.id }));
+    set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
     return obj;
   },
 
@@ -141,18 +200,10 @@ export const useStore = create<DiagramState & Actions>((set) => ({
       amplitude: 8,
       wavelength: 16,
     };
-    set((s) => ({ objects: [...s.objects, obj], selectedId: obj.id }));
+    set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
     return obj;
   },
 
-  setLineStyle: (id, style) =>
-    set((s) => ({
-      objects: s.objects.map((o) => (o.id === id && o.kind === "line" ? { ...o, style } : o)),
-    })),
-  setArrow: (id, arrow) =>
-    set((s) => ({
-      objects: s.objects.map((o) => (o.id === id && o.kind === "line" ? { ...o, arrow } : o)),
-    })),
   setColor: (id, color) =>
     set((s) => ({
       objects: s.objects.map((o) => {
@@ -171,13 +222,21 @@ export const useStore = create<DiagramState & Actions>((set) => ({
       objects: s.objects.map((o) => (o.id === id && o.kind === "vertex" ? { ...o, fill } : o)),
     })),
 
+  setSettings: (patch) => {
+    const next = { ...get().settings, ...patch };
+    persistSettings(next);
+    set({ settings: next });
+  },
+
   loadState: (s) =>
     set(() => ({
       ...initial,
       ...s,
       objects: s.objects ?? [],
       strokes: s.strokes ?? [],
+      selectedIds: [],
+      settings: get().settings, // keep current settings
     })),
 
-  reset: () => set({ ...initial }),
+  reset: () => set({ ...initial, settings: get().settings }),
 }));
