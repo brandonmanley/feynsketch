@@ -39,8 +39,19 @@ export function PropertyPanel() {
   const updateMany = useStore((s) => s.updateMany);
   const removeObject = useStore((s) => s.removeObject);
   const removeMany = useStore((s) => s.removeMany);
+  const pushHistory = useStore((s) => s.pushHistory);
 
   const selected = objects.filter((o) => selectedIds.includes(o.id));
+
+  // Wrappers that record an undo step before applying the change.
+  const updateOne = (id: string, patch: Partial<DiagramObject>) => {
+    pushHistory();
+    updateObject(id, patch);
+  };
+  const updateGroup = (ids: string[], patcher: (o: DiagramObject) => Partial<DiagramObject>) => {
+    pushHistory();
+    updateMany(ids, patcher);
+  };
 
   if (selected.length === 0) {
     return (
@@ -56,6 +67,7 @@ export function PropertyPanel() {
             <li>Drag to move. Drag handles to resize.</li>
             <li>On a selected line, double-click to add an anchor point.</li>
             <li>Backspace or Delete removes the selected objects.</li>
+            <li>Cmd/Ctrl-Z to undo, Shift-Cmd/Ctrl-Z to redo.</li>
           </ul>
         </div>
       </div>
@@ -63,7 +75,14 @@ export function PropertyPanel() {
   }
 
   if (selected.length > 1) {
-    return <MultiPanel selected={selected} updateMany={updateMany} removeMany={removeMany} />;
+    return (
+      <MultiPanel
+        selected={selected}
+        updateGroup={updateGroup}
+        beforeSlide={pushHistory}
+        removeMany={removeMany}
+      />
+    );
   }
 
   const single = selected[0];
@@ -85,7 +104,7 @@ export function PropertyPanel() {
                 <button
                   key={s.key}
                   className={`chip ${single.style === s.key ? "active" : ""}`}
-                  onClick={() => updateObject(single.id, { style: s.key })}
+                  onClick={() => updateOne(single.id, { style: s.key })}
                 >
                   {s.label}
                 </button>
@@ -98,7 +117,7 @@ export function PropertyPanel() {
                 <button
                   key={a.key}
                   className={`chip ${single.arrow === a.key ? "active" : ""}`}
-                  onClick={() => updateObject(single.id, { arrow: a.key })}
+                  onClick={() => updateOne(single.id, { arrow: a.key })}
                 >
                   {a.label}
                 </button>
@@ -108,7 +127,7 @@ export function PropertyPanel() {
           <Section title="Color">
             <ColorPicker
               value={single.color}
-              onChange={(c) => updateObject(single.id, { color: c })}
+              onChange={(c) => updateOne(single.id, { color: c })}
             />
           </Section>
           <Section title="Stroke width">
@@ -117,6 +136,7 @@ export function PropertyPanel() {
               min={0.5}
               max={8}
               step={0.5}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { strokeWidth: v })}
             />
           </Section>
@@ -128,6 +148,7 @@ export function PropertyPanel() {
                   min={2}
                   max={30}
                   step={0.5}
+                  beforeSlide={pushHistory}
                   onChange={(v) => updateObject(single.id, { amplitude: v })}
                 />
               </Section>
@@ -137,6 +158,7 @@ export function PropertyPanel() {
                   min={8}
                   max={60}
                   step={0.5}
+                  beforeSlide={pushHistory}
                   onChange={(v) => updateObject(single.id, { wavelength: v })}
                 />
               </Section>
@@ -150,7 +172,7 @@ export function PropertyPanel() {
               className="btn"
               onClick={() => {
                 const next = [single.points[0], single.points[single.points.length - 1]];
-                updateObject(single.id, { points: next });
+                updateOne(single.id, { points: next });
               }}
             >
               Reset to straight
@@ -167,7 +189,7 @@ export function PropertyPanel() {
                 <button
                   key={s}
                   className={`chip ${single.shape === s ? "active" : ""}`}
-                  onClick={() => updateObject(single.id, { shape: s })}
+                  onClick={() => updateOne(single.id, { shape: s })}
                 >
                   {s}
                 </button>
@@ -175,12 +197,12 @@ export function PropertyPanel() {
             </div>
           </Section>
           <Section title="Stroke color">
-            <ColorPicker value={single.stroke} onChange={(c) => updateObject(single.id, { stroke: c })} />
+            <ColorPicker value={single.stroke} onChange={(c) => updateOne(single.id, { stroke: c })} />
           </Section>
           <Section title="Fill color">
             <ColorPicker
               value={single.fill}
-              onChange={(c) => updateObject(single.id, { fill: c })}
+              onChange={(c) => updateOne(single.id, { fill: c })}
               allowTransparent
             />
           </Section>
@@ -190,6 +212,7 @@ export function PropertyPanel() {
               min={8}
               max={400}
               step={1}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { width: v })}
             />
           </Section>
@@ -199,6 +222,7 @@ export function PropertyPanel() {
               min={8}
               max={400}
               step={1}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { height: v })}
             />
           </Section>
@@ -208,6 +232,7 @@ export function PropertyPanel() {
               min={-180}
               max={180}
               step={1}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { rotation: v })}
             />
           </Section>
@@ -217,6 +242,7 @@ export function PropertyPanel() {
               min={0}
               max={10}
               step={0.5}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { strokeWidth: v })}
             />
           </Section>
@@ -231,7 +257,7 @@ export function PropertyPanel() {
                 <button
                   key={s}
                   className={`chip ${single.shape === s ? "active" : ""}`}
-                  onClick={() => updateObject(single.id, { shape: s })}
+                  onClick={() => updateOne(single.id, { shape: s })}
                 >
                   {s}
                 </button>
@@ -244,7 +270,7 @@ export function PropertyPanel() {
                 <button
                   key={f}
                   className={`chip ${single.fill === f ? "active" : ""}`}
-                  onClick={() => updateObject(single.id, { fill: f })}
+                  onClick={() => updateOne(single.id, { fill: f })}
                 >
                   {f}
                 </button>
@@ -252,7 +278,7 @@ export function PropertyPanel() {
             </div>
           </Section>
           <Section title="Color">
-            <ColorPicker value={single.color} onChange={(c) => updateObject(single.id, { color: c })} />
+            <ColorPicker value={single.color} onChange={(c) => updateOne(single.id, { color: c })} />
           </Section>
           <Section title="Size">
             <SliderRow
@@ -260,6 +286,7 @@ export function PropertyPanel() {
               min={3}
               max={30}
               step={0.5}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { size: v })}
             />
           </Section>
@@ -273,11 +300,12 @@ export function PropertyPanel() {
               className="textarea"
               rows={3}
               value={single.latex}
+              onFocus={pushHistory}
               onChange={(e) => updateObject(single.id, { latex: e.target.value })}
             />
           </Section>
           <Section title="Color">
-            <ColorPicker value={single.color} onChange={(c) => updateObject(single.id, { color: c })} />
+            <ColorPicker value={single.color} onChange={(c) => updateOne(single.id, { color: c })} />
           </Section>
           <Section title="Font size">
             <SliderRow
@@ -285,6 +313,7 @@ export function PropertyPanel() {
               min={10}
               max={48}
               step={1}
+              beforeSlide={pushHistory}
               onChange={(v) => updateObject(single.id, { fontSize: v })}
             />
           </Section>
@@ -292,7 +321,7 @@ export function PropertyPanel() {
             <select
               className="select"
               value={single.fontFamily}
-              onChange={(e) => updateObject(single.id, { fontFamily: e.target.value })}
+              onChange={(e) => updateOne(single.id, { fontFamily: e.target.value })}
             >
               <option value="KaTeX_Main, serif">KaTeX / Serif</option>
               <option value="Inter, system-ui, sans-serif">Sans-serif</option>
@@ -314,13 +343,16 @@ export function PropertyPanel() {
 
 function MultiPanel({
   selected,
-  updateMany,
+  updateGroup,
+  beforeSlide,
   removeMany,
 }: {
   selected: DiagramObject[];
-  updateMany: (ids: string[], patcher: (obj: DiagramObject) => Partial<DiagramObject>) => void;
+  updateGroup: (ids: string[], patcher: (o: DiagramObject) => Partial<DiagramObject>) => void;
+  beforeSlide: () => void;
   removeMany: (ids: string[]) => void;
 }) {
+  const updateMany = useStore((s) => s.updateMany);
   const ids = selected.map((o) => o.id);
   const allSameKind = selected.every((o) => o.kind === selected[0].kind);
   const allLines = selected.every((o) => o.kind === "line");
@@ -328,13 +360,6 @@ function MultiPanel({
   const allVertices = selected.every((o) => o.kind === "vertex");
   const colors = new Set(selected.map(colorOf));
   const sharedColor = colors.size === 1 ? Array.from(colors)[0] : "";
-
-  const setStrokeWidthIfApplicable = (v: number) => {
-    updateMany(ids, (o) => {
-      if (o.kind === "line" || o.kind === "shape") return { strokeWidth: v } as Partial<DiagramObject>;
-      return {};
-    });
-  };
 
   return (
     <div className="panel">
@@ -347,22 +372,24 @@ function MultiPanel({
         <ColorPicker
           value={sharedColor || "#111111"}
           placeholder={sharedColor ? undefined : "(mixed)"}
-          onChange={(c) => updateMany(ids, (o) => applyColor(o, c))}
+          onChange={(c) => updateGroup(ids, (o) => applyColor(o, c))}
         />
       </Section>
 
       {(allLines || allShapes) && (
         <Section title="Stroke width">
           <SliderRow
-            value={
-              allLines
-                ? (selected[0] as any).strokeWidth
-                : (selected[0] as any).strokeWidth
-            }
+            value={(selected[0] as any).strokeWidth}
             min={0}
             max={10}
             step={0.5}
-            onChange={setStrokeWidthIfApplicable}
+            beforeSlide={beforeSlide}
+            onChange={(v) =>
+              updateMany(ids, (o) => {
+                if (o.kind === "line" || o.kind === "shape") return { strokeWidth: v } as Partial<DiagramObject>;
+                return {};
+              })
+            }
           />
         </Section>
       )}
@@ -374,7 +401,7 @@ function MultiPanel({
               <button
                 key={s.key}
                 className="chip"
-                onClick={() => updateMany(ids, () => ({ style: s.key }) as Partial<DiagramObject>)}
+                onClick={() => updateGroup(ids, () => ({ style: s.key }) as Partial<DiagramObject>)}
               >
                 {s.label}
               </button>
@@ -390,7 +417,7 @@ function MultiPanel({
               <button
                 key={a.key}
                 className="chip"
-                onClick={() => updateMany(ids, () => ({ arrow: a.key }) as Partial<DiagramObject>)}
+                onClick={() => updateGroup(ids, () => ({ arrow: a.key }) as Partial<DiagramObject>)}
               >
                 {a.label}
               </button>
@@ -407,7 +434,7 @@ function MultiPanel({
                 <button
                   key={s}
                   className="chip"
-                  onClick={() => updateMany(ids, () => ({ shape: s }) as Partial<DiagramObject>)}
+                  onClick={() => updateGroup(ids, () => ({ shape: s }) as Partial<DiagramObject>)}
                 >
                   {s}
                 </button>
@@ -420,7 +447,7 @@ function MultiPanel({
                 <button
                   key={f}
                   className="chip"
-                  onClick={() => updateMany(ids, () => ({ fill: f }) as Partial<DiagramObject>)}
+                  onClick={() => updateGroup(ids, () => ({ fill: f }) as Partial<DiagramObject>)}
                 >
                   {f}
                 </button>
@@ -461,12 +488,14 @@ function SliderRow({
   min,
   max,
   step,
+  beforeSlide,
   onChange,
 }: {
   value: number;
   min: number;
   max: number;
   step: number;
+  beforeSlide?: () => void;
   onChange: (v: number) => void;
 }) {
   return (
@@ -477,6 +506,7 @@ function SliderRow({
         max={max}
         step={step}
         value={value}
+        onPointerDown={() => beforeSlide?.()}
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <input
@@ -486,6 +516,7 @@ function SliderRow({
         max={max}
         step={step}
         value={Number(value.toFixed(2))}
+        onFocus={() => beforeSlide?.()}
         onChange={(e) => onChange(Number(e.target.value))}
       />
     </div>

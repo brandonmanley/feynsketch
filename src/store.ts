@@ -12,7 +12,6 @@ import type {
   VertexObject,
   LabelObject,
   LineStyle,
-  ArrowPosition,
   VertexShape,
   VertexFill,
   Point,
@@ -22,6 +21,7 @@ let idCounter = 1;
 export const uid = (prefix = "o") => `${prefix}_${Date.now().toString(36)}_${(idCounter++).toString(36)}`;
 
 const SETTINGS_KEY = "feynsketch:settings";
+const HISTORY_LIMIT = 100;
 
 function loadSettings(): Settings {
   try {
@@ -46,6 +46,16 @@ function persistSettings(s: Settings) {
   } catch {
     /* ignore */
   }
+}
+
+interface Snapshot {
+  objects: DiagramObject[];
+  strokes: Stroke[];
+}
+
+interface HistoryState {
+  past: Snapshot[];
+  future: Snapshot[];
 }
 
 interface Actions {
@@ -77,6 +87,14 @@ interface Actions {
 
   setSettings: (patch: Partial<Settings>) => void;
 
+  /** Push the current (objects, strokes) onto the undo stack. Call BEFORE
+   *  performing an undoable change (or before starting a drag). */
+  pushHistory: () => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+
   loadState: (s: Partial<DiagramState>) => void;
   reset: () => void;
 }
@@ -91,44 +109,72 @@ const initial: DiagramState = {
   settings: loadSettings(),
 };
 
-export const useStore = create<DiagramState & Actions>((set, get) => ({
+const initialHistory: HistoryState = { past: [], future: [] };
+
+function snapshot(s: { objects: DiagramObject[]; strokes: Stroke[] }): Snapshot {
+  return {
+    objects: s.objects.map((o) => structuredClone(o)),
+    strokes: s.strokes.map((st) => ({ id: st.id, points: st.points.map((p) => ({ ...p })) })),
+  };
+}
+
+export const useStore = create<DiagramState & HistoryState & Actions>((set, get) => ({
   ...initial,
+  ...initialHistory,
 
   setMode: (mode) => set({ mode }),
   setTool: (tool) => set({ tool }),
   setPendingShape: (pendingShape) => set({ pendingShape }),
 
-  addStroke: (stroke) => set((s) => ({ strokes: [...s.strokes, stroke] })),
-  clearStrokes: () => set({ strokes: [] }),
+  addStroke: (stroke) => {
+    get().pushHistory();
+    set((s) => ({ strokes: [...s.strokes, stroke] }));
+  },
+  clearStrokes: () => {
+    get().pushHistory();
+    set({ strokes: [] });
+  },
 
-  setObjects: (objects) => set({ objects }),
-  addObject: (obj) => set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] })),
+  setObjects: (objects) => {
+    get().pushHistory();
+    set({ objects });
+  },
+  addObject: (obj) => {
+    get().pushHistory();
+    set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
+  },
+  // updateObject and updateMany are intentionally NOT auto-history; drag
+  // handlers call pushHistory() once at the start of the drag.
   updateObject: (id, patch) =>
     set((s) => ({
       objects: s.objects.map((o) => (o.id === id ? ({ ...o, ...patch } as DiagramObject) : o)),
     })),
   updateMany: (ids, patcher) =>
     set((s) => {
-      const set = new Set(ids);
+      const idSet = new Set(ids);
       return {
         objects: s.objects.map((o) =>
-          set.has(o.id) ? ({ ...o, ...patcher(o) } as DiagramObject) : o
+          idSet.has(o.id) ? ({ ...o, ...patcher(o) } as DiagramObject) : o
         ),
       };
     }),
-  removeObject: (id) =>
+  removeObject: (id) => {
+    get().pushHistory();
     set((s) => ({
       objects: s.objects.filter((o) => o.id !== id),
       selectedIds: s.selectedIds.filter((sid) => sid !== id),
-    })),
-  removeMany: (ids) =>
+    }));
+  },
+  removeMany: (ids) => {
+    get().pushHistory();
     set((s) => {
       const remove = new Set(ids);
       return {
         objects: s.objects.filter((o) => !remove.has(o.id)),
         selectedIds: s.selectedIds.filter((sid) => !remove.has(sid)),
       };
-    }),
+    });
+  },
 
   select: (id) => set({ selectedIds: id ? [id] : [] }),
   setSelection: (ids) => set({ selectedIds: ids }),
@@ -141,6 +187,7 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
     }),
 
   addLabel: (latex, x, y) => {
+    get().pushHistory();
     const obj: LabelObject = {
       id: uid("lbl"),
       kind: "label",
@@ -156,6 +203,7 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
   },
 
   addShape: (shape, x, y) => {
+    get().pushHistory();
     const obj: ShapeObject = {
       id: uid("shp"),
       kind: "shape",
@@ -174,6 +222,7 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
   },
 
   addVertex: (x, y) => {
+    get().pushHistory();
     const obj: VertexObject = {
       id: uid("vtx"),
       kind: "vertex",
@@ -189,6 +238,7 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
   },
 
   addLine: (points, style = "solid") => {
+    get().pushHistory();
     const obj: LineObject = {
       id: uid("ln"),
       kind: "line",
@@ -204,7 +254,8 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
     return obj;
   },
 
-  setColor: (id, color) =>
+  setColor: (id, color) => {
+    get().pushHistory();
     set((s) => ({
       objects: s.objects.map((o) => {
         if (o.id !== id) return o;
@@ -212,21 +263,64 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
         if (o.kind === "shape") return { ...o, stroke: color };
         return o;
       }),
-    })),
-  setVertexShape: (id, shape) =>
+    }));
+  },
+  setVertexShape: (id, shape) => {
+    get().pushHistory();
     set((s) => ({
       objects: s.objects.map((o) => (o.id === id && o.kind === "vertex" ? { ...o, shape } : o)),
-    })),
-  setVertexFill: (id, fill) =>
+    }));
+  },
+  setVertexFill: (id, fill) => {
+    get().pushHistory();
     set((s) => ({
       objects: s.objects.map((o) => (o.id === id && o.kind === "vertex" ? { ...o, fill } : o)),
-    })),
+    }));
+  },
 
   setSettings: (patch) => {
     const next = { ...get().settings, ...patch };
     persistSettings(next);
     set({ settings: next });
   },
+
+  pushHistory: () => {
+    const s = get();
+    const snap = snapshot({ objects: s.objects, strokes: s.strokes });
+    const past = [...s.past, snap];
+    if (past.length > HISTORY_LIMIT) past.shift();
+    set({ past, future: [] });
+  },
+  undo: () => {
+    const s = get();
+    if (s.past.length === 0) return;
+    const previous = s.past[s.past.length - 1];
+    const newPast = s.past.slice(0, -1);
+    const current = snapshot({ objects: s.objects, strokes: s.strokes });
+    set({
+      past: newPast,
+      future: [current, ...s.future],
+      objects: previous.objects,
+      strokes: previous.strokes,
+      selectedIds: [],
+    });
+  },
+  redo: () => {
+    const s = get();
+    if (s.future.length === 0) return;
+    const next = s.future[0];
+    const newFuture = s.future.slice(1);
+    const current = snapshot({ objects: s.objects, strokes: s.strokes });
+    set({
+      past: [...s.past, current],
+      future: newFuture,
+      objects: next.objects,
+      strokes: next.strokes,
+      selectedIds: [],
+    });
+  },
+  canUndo: () => get().past.length > 0,
+  canRedo: () => get().future.length > 0,
 
   loadState: (s) =>
     set(() => ({
@@ -235,8 +329,10 @@ export const useStore = create<DiagramState & Actions>((set, get) => ({
       objects: s.objects ?? [],
       strokes: s.strokes ?? [],
       selectedIds: [],
-      settings: get().settings, // keep current settings
+      settings: get().settings,
+      past: [],
+      future: [],
     })),
 
-  reset: () => set({ ...initial, settings: get().settings }),
+  reset: () => set({ ...initial, settings: get().settings, past: [], future: [] }),
 }));

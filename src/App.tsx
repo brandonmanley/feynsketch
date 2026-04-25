@@ -43,21 +43,34 @@ export default function App() {
   }, []);
 
   // Backspace / Delete deletes the selected objects, with optional confirmation.
+  // Cmd/Ctrl-Z = undo, Shift+Cmd/Ctrl-Z (or Cmd/Ctrl-Y) = redo.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Backspace" && e.key !== "Delete") return;
       const target = e.target as HTMLElement | null;
-      if (target) {
-        const tag = target.tagName;
-        if (
-          tag === "INPUT" ||
-          tag === "TEXTAREA" ||
-          tag === "SELECT" ||
-          (target as HTMLElement).isContentEditable
-        ) {
-          return; // let text editing proceed normally
-        }
+      const isTextInput =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          (target as HTMLElement).isContentEditable);
+
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && (e.key === "z" || e.key === "Z")) {
+        if (isTextInput) return;
+        e.preventDefault();
+        if (e.shiftKey) useStore.getState().redo();
+        else useStore.getState().undo();
+        return;
       }
+      if (meta && (e.key === "y" || e.key === "Y")) {
+        if (isTextInput) return;
+        e.preventDefault();
+        useStore.getState().redo();
+        return;
+      }
+
+      if (e.key !== "Backspace" && e.key !== "Delete") return;
+      if (isTextInput) return;
       if (selectedIds.length === 0) return;
       e.preventDefault();
       const proceed = settings.confirmDelete

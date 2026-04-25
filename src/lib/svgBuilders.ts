@@ -3,36 +3,45 @@ import { pathFromPoints, sampleByArcLength, totalLength } from "./geometry";
 
 // Build a sine-wave "photon" path that follows an arbitrary polyline.
 // amplitude and wavelength control shape. The wave is drawn perpendicular to the local tangent.
+// The effective wavelength is rounded so the wave completes whole cycles along the path,
+// guaranteeing the curve starts and ends exactly on the polyline endpoints.
 export function wigglyPath(points: Point[], wavelength = 18, amplitude = 8): string {
   if (points.length < 2) return "";
   const L = totalLength(points);
   if (L <= 0) return "";
-  const step = Math.min(2, Math.max(0.75, wavelength / 16));
+  const cycles = Math.max(1, Math.round(L / wavelength));
+  const effWavelength = L / cycles;
+  const step = Math.min(2, Math.max(0.75, effWavelength / 16));
   const samples = sampleByArcLength(points, step);
   if (samples.length < 2) return "";
   const twoPi = Math.PI * 2;
   const pts: Point[] = samples.map(({ p, n, s }) => {
-    const a = amplitude * Math.sin((s / wavelength) * twoPi);
+    const a = amplitude * Math.sin((s / effWavelength) * twoPi);
     return { x: p.x + n.x * a, y: p.y + n.y * a };
   });
+  // Force the first/last sample to land exactly on the path endpoints.
+  pts[0] = { ...samples[0].p };
+  pts[pts.length - 1] = { ...samples[samples.length - 1].p };
   return pathFromPoints(pts, true);
 }
 
 // Build a "gluon" curly path - a series of loops/coils along the path.
 // We use a parametric cycloid-like curve: x = s - r*sin(theta), y = r*cos(theta)
 // Transformed into tangent/normal frame.
+// As with wigglyPath, the wavelength is adjusted so the curve completes whole
+// loops along the path and lands exactly on the endpoints.
 export function curlyPath(points: Point[], wavelength = 22, amplitude = 10): string {
   if (points.length < 2) return "";
   const L = totalLength(points);
   if (L <= 0) return "";
-  const step = Math.min(1.2, Math.max(0.4, wavelength / 30));
+  const cycles = Math.max(1, Math.round(L / wavelength));
+  const effWavelength = L / cycles;
+  const step = Math.min(1.2, Math.max(0.4, effWavelength / 30));
   const samples = sampleByArcLength(points, step);
   if (samples.length < 2) return "";
   const twoPi = Math.PI * 2;
   const pts: Point[] = samples.map(({ p, t, n, s }) => {
-    const theta = (s / wavelength) * twoPi;
-    // cycloid-like: forward offset plus amplitude in normal and opposite tangent direction.
-    // Makes small loops that look like gluon coils.
+    const theta = (s / effWavelength) * twoPi;
     const along = -amplitude * 0.55 * Math.sin(theta);
     const across = amplitude * Math.cos(theta) - amplitude;
     return {
@@ -40,6 +49,8 @@ export function curlyPath(points: Point[], wavelength = 22, amplitude = 10): str
       y: p.y + t.y * along + n.y * across,
     };
   });
+  pts[0] = { ...samples[0].p };
+  pts[pts.length - 1] = { ...samples[samples.length - 1].p };
   return pathFromPoints(pts, true);
 }
 
