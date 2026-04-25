@@ -1,5 +1,5 @@
 import { useStore } from "../store";
-import type { ArrowPosition, LineStyle, ShapeKind, VertexFill, VertexShape } from "../types";
+import type { ArrowPosition, DiagramObject, LineStyle, ShapeKind, VertexFill, VertexShape } from "../types";
 
 const LINE_STYLES: { key: LineStyle; label: string }[] = [
   { key: "solid", label: "Solid" },
@@ -21,15 +21,28 @@ const VERTEX_SHAPES: VertexShape[] = ["circle", "square"];
 const VERTEX_FILLS: VertexFill[] = ["filled", "open", "none"];
 const SHAPE_KINDS: ShapeKind[] = ["circle", "ellipse", "square", "rect", "triangle", "diamond"];
 
+function colorOf(o: DiagramObject): string {
+  if (o.kind === "shape") return o.stroke;
+  if (o.kind === "line" || o.kind === "vertex" || o.kind === "label") return o.color;
+  return "#111111";
+}
+
+function applyColor(o: DiagramObject, color: string): Partial<DiagramObject> {
+  if (o.kind === "shape") return { stroke: color } as Partial<DiagramObject>;
+  return { color } as Partial<DiagramObject>;
+}
+
 export function PropertyPanel() {
   const objects = useStore((s) => s.objects);
-  const selectedId = useStore((s) => s.selectedId);
+  const selectedIds = useStore((s) => s.selectedIds);
   const updateObject = useStore((s) => s.updateObject);
+  const updateMany = useStore((s) => s.updateMany);
   const removeObject = useStore((s) => s.removeObject);
+  const removeMany = useStore((s) => s.removeMany);
 
-  const selected = objects.find((o) => o.id === selectedId);
+  const selected = objects.filter((o) => selectedIds.includes(o.id));
 
-  if (!selected) {
+  if (selected.length === 0) {
     return (
       <div className="panel">
         <div className="panel-title">Properties</div>
@@ -38,32 +51,41 @@ export function PropertyPanel() {
           <div className="panel-subtitle">Tips</div>
           <ul className="tips">
             <li>Click an object to select it.</li>
+            <li>Drag from empty space to box-select multiple objects.</li>
+            <li>Hold Shift to add/remove from a selection.</li>
             <li>Drag to move. Drag handles to resize.</li>
             <li>On a selected line, double-click to add an anchor point.</li>
+            <li>Backspace or Delete removes the selected objects.</li>
           </ul>
         </div>
       </div>
     );
   }
 
+  if (selected.length > 1) {
+    return <MultiPanel selected={selected} updateMany={updateMany} removeMany={removeMany} />;
+  }
+
+  const single = selected[0];
+
   return (
     <div className="panel">
       <div className="panel-title">
-        {selected.kind === "line" && "Line"}
-        {selected.kind === "shape" && "Shape"}
-        {selected.kind === "vertex" && "Vertex"}
-        {selected.kind === "label" && "Label"}
+        {single.kind === "line" && "Line"}
+        {single.kind === "shape" && "Shape"}
+        {single.kind === "vertex" && "Vertex"}
+        {single.kind === "label" && "Label"}
       </div>
 
-      {selected.kind === "line" && (
+      {single.kind === "line" && (
         <>
           <Section title="Line style">
             <div className="grid two">
               {LINE_STYLES.map((s) => (
                 <button
                   key={s.key}
-                  className={`chip ${selected.style === s.key ? "active" : ""}`}
-                  onClick={() => updateObject(selected.id, { style: s.key })}
+                  className={`chip ${single.style === s.key ? "active" : ""}`}
+                  onClick={() => updateObject(single.id, { style: s.key })}
                 >
                   {s.label}
                 </button>
@@ -75,8 +97,8 @@ export function PropertyPanel() {
               {ARROWS.map((a) => (
                 <button
                   key={a.key}
-                  className={`chip ${selected.arrow === a.key ? "active" : ""}`}
-                  onClick={() => updateObject(selected.id, { arrow: a.key })}
+                  className={`chip ${single.arrow === a.key ? "active" : ""}`}
+                  onClick={() => updateObject(single.id, { arrow: a.key })}
                 >
                   {a.label}
                 </button>
@@ -85,37 +107,37 @@ export function PropertyPanel() {
           </Section>
           <Section title="Color">
             <ColorPicker
-              value={selected.color}
-              onChange={(c) => updateObject(selected.id, { color: c })}
+              value={single.color}
+              onChange={(c) => updateObject(single.id, { color: c })}
             />
           </Section>
           <Section title="Stroke width">
             <SliderRow
-              value={selected.strokeWidth}
+              value={single.strokeWidth}
               min={0.5}
               max={8}
               step={0.5}
-              onChange={(v) => updateObject(selected.id, { strokeWidth: v })}
+              onChange={(v) => updateObject(single.id, { strokeWidth: v })}
             />
           </Section>
-          {(selected.style === "wiggly" || selected.style === "curly") && (
+          {(single.style === "wiggly" || single.style === "curly") && (
             <>
               <Section title="Amplitude">
                 <SliderRow
-                  value={selected.amplitude}
+                  value={single.amplitude}
                   min={2}
                   max={30}
                   step={0.5}
-                  onChange={(v) => updateObject(selected.id, { amplitude: v })}
+                  onChange={(v) => updateObject(single.id, { amplitude: v })}
                 />
               </Section>
               <Section title="Wavelength">
                 <SliderRow
-                  value={selected.wavelength}
+                  value={single.wavelength}
                   min={8}
                   max={60}
                   step={0.5}
-                  onChange={(v) => updateObject(selected.id, { wavelength: v })}
+                  onChange={(v) => updateObject(single.id, { wavelength: v })}
                 />
               </Section>
             </>
@@ -127,8 +149,8 @@ export function PropertyPanel() {
             <button
               className="btn"
               onClick={() => {
-                const next = [selected.points[0], selected.points[selected.points.length - 1]];
-                updateObject(selected.id, { points: next });
+                const next = [single.points[0], single.points[single.points.length - 1]];
+                updateObject(single.id, { points: next });
               }}
             >
               Reset to straight
@@ -137,15 +159,15 @@ export function PropertyPanel() {
         </>
       )}
 
-      {selected.kind === "shape" && (
+      {single.kind === "shape" && (
         <>
           <Section title="Shape">
             <div className="grid two">
               {SHAPE_KINDS.map((s) => (
                 <button
                   key={s}
-                  className={`chip ${selected.shape === s ? "active" : ""}`}
-                  onClick={() => updateObject(selected.id, { shape: s })}
+                  className={`chip ${single.shape === s ? "active" : ""}`}
+                  onClick={() => updateObject(single.id, { shape: s })}
                 >
                   {s}
                 </button>
@@ -153,63 +175,63 @@ export function PropertyPanel() {
             </div>
           </Section>
           <Section title="Stroke color">
-            <ColorPicker value={selected.stroke} onChange={(c) => updateObject(selected.id, { stroke: c })} />
+            <ColorPicker value={single.stroke} onChange={(c) => updateObject(single.id, { stroke: c })} />
           </Section>
           <Section title="Fill color">
             <ColorPicker
-              value={selected.fill}
-              onChange={(c) => updateObject(selected.id, { fill: c })}
+              value={single.fill}
+              onChange={(c) => updateObject(single.id, { fill: c })}
               allowTransparent
             />
           </Section>
           <Section title="Width">
             <SliderRow
-              value={selected.width}
+              value={single.width}
               min={8}
               max={400}
               step={1}
-              onChange={(v) => updateObject(selected.id, { width: v })}
+              onChange={(v) => updateObject(single.id, { width: v })}
             />
           </Section>
           <Section title="Height">
             <SliderRow
-              value={selected.height}
+              value={single.height}
               min={8}
               max={400}
               step={1}
-              onChange={(v) => updateObject(selected.id, { height: v })}
+              onChange={(v) => updateObject(single.id, { height: v })}
             />
           </Section>
           <Section title="Rotation">
             <SliderRow
-              value={selected.rotation}
+              value={single.rotation}
               min={-180}
               max={180}
               step={1}
-              onChange={(v) => updateObject(selected.id, { rotation: v })}
+              onChange={(v) => updateObject(single.id, { rotation: v })}
             />
           </Section>
           <Section title="Stroke width">
             <SliderRow
-              value={selected.strokeWidth}
+              value={single.strokeWidth}
               min={0}
               max={10}
               step={0.5}
-              onChange={(v) => updateObject(selected.id, { strokeWidth: v })}
+              onChange={(v) => updateObject(single.id, { strokeWidth: v })}
             />
           </Section>
         </>
       )}
 
-      {selected.kind === "vertex" && (
+      {single.kind === "vertex" && (
         <>
           <Section title="Vertex shape">
             <div className="grid two">
               {VERTEX_SHAPES.map((s) => (
                 <button
                   key={s}
-                  className={`chip ${selected.shape === s ? "active" : ""}`}
-                  onClick={() => updateObject(selected.id, { shape: s })}
+                  className={`chip ${single.shape === s ? "active" : ""}`}
+                  onClick={() => updateObject(single.id, { shape: s })}
                 >
                   {s}
                 </button>
@@ -221,8 +243,8 @@ export function PropertyPanel() {
               {VERTEX_FILLS.map((f) => (
                 <button
                   key={f}
-                  className={`chip ${selected.fill === f ? "active" : ""}`}
-                  onClick={() => updateObject(selected.id, { fill: f })}
+                  className={`chip ${single.fill === f ? "active" : ""}`}
+                  onClick={() => updateObject(single.id, { fill: f })}
                 >
                   {f}
                 </button>
@@ -230,47 +252,47 @@ export function PropertyPanel() {
             </div>
           </Section>
           <Section title="Color">
-            <ColorPicker value={selected.color} onChange={(c) => updateObject(selected.id, { color: c })} />
+            <ColorPicker value={single.color} onChange={(c) => updateObject(single.id, { color: c })} />
           </Section>
           <Section title="Size">
             <SliderRow
-              value={selected.size}
+              value={single.size}
               min={3}
               max={30}
               step={0.5}
-              onChange={(v) => updateObject(selected.id, { size: v })}
+              onChange={(v) => updateObject(single.id, { size: v })}
             />
           </Section>
         </>
       )}
 
-      {selected.kind === "label" && (
+      {single.kind === "label" && (
         <>
           <Section title="LaTeX source">
             <textarea
               className="textarea"
               rows={3}
-              value={selected.latex}
-              onChange={(e) => updateObject(selected.id, { latex: e.target.value })}
+              value={single.latex}
+              onChange={(e) => updateObject(single.id, { latex: e.target.value })}
             />
           </Section>
           <Section title="Color">
-            <ColorPicker value={selected.color} onChange={(c) => updateObject(selected.id, { color: c })} />
+            <ColorPicker value={single.color} onChange={(c) => updateObject(single.id, { color: c })} />
           </Section>
           <Section title="Font size">
             <SliderRow
-              value={selected.fontSize}
+              value={single.fontSize}
               min={10}
               max={48}
               step={1}
-              onChange={(v) => updateObject(selected.id, { fontSize: v })}
+              onChange={(v) => updateObject(single.id, { fontSize: v })}
             />
           </Section>
           <Section title="Font family">
             <select
               className="select"
-              value={selected.fontFamily}
-              onChange={(e) => updateObject(selected.id, { fontFamily: e.target.value })}
+              value={single.fontFamily}
+              onChange={(e) => updateObject(single.id, { fontFamily: e.target.value })}
             >
               <option value="KaTeX_Main, serif">KaTeX / Serif</option>
               <option value="Inter, system-ui, sans-serif">Sans-serif</option>
@@ -282,8 +304,143 @@ export function PropertyPanel() {
       )}
 
       <div className="panel-section">
-        <button className="btn danger" onClick={() => removeObject(selected.id)}>
+        <button className="btn danger" onClick={() => removeObject(single.id)}>
           Delete
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MultiPanel({
+  selected,
+  updateMany,
+  removeMany,
+}: {
+  selected: DiagramObject[];
+  updateMany: (ids: string[], patcher: (obj: DiagramObject) => Partial<DiagramObject>) => void;
+  removeMany: (ids: string[]) => void;
+}) {
+  const ids = selected.map((o) => o.id);
+  const allSameKind = selected.every((o) => o.kind === selected[0].kind);
+  const allLines = selected.every((o) => o.kind === "line");
+  const allShapes = selected.every((o) => o.kind === "shape");
+  const allVertices = selected.every((o) => o.kind === "vertex");
+  const colors = new Set(selected.map(colorOf));
+  const sharedColor = colors.size === 1 ? Array.from(colors)[0] : "";
+
+  const setStrokeWidthIfApplicable = (v: number) => {
+    updateMany(ids, (o) => {
+      if (o.kind === "line" || o.kind === "shape") return { strokeWidth: v } as Partial<DiagramObject>;
+      return {};
+    });
+  };
+
+  return (
+    <div className="panel">
+      <div className="panel-title">{selected.length} objects selected</div>
+      <div className="panel-hint">
+        Only properties shared by every selected object are shown.
+      </div>
+
+      <Section title="Color">
+        <ColorPicker
+          value={sharedColor || "#111111"}
+          placeholder={sharedColor ? undefined : "(mixed)"}
+          onChange={(c) => updateMany(ids, (o) => applyColor(o, c))}
+        />
+      </Section>
+
+      {(allLines || allShapes) && (
+        <Section title="Stroke width">
+          <SliderRow
+            value={
+              allLines
+                ? (selected[0] as any).strokeWidth
+                : (selected[0] as any).strokeWidth
+            }
+            min={0}
+            max={10}
+            step={0.5}
+            onChange={setStrokeWidthIfApplicable}
+          />
+        </Section>
+      )}
+
+      {allLines && (
+        <Section title="Line style">
+          <div className="grid two">
+            {LINE_STYLES.map((s) => (
+              <button
+                key={s.key}
+                className="chip"
+                onClick={() => updateMany(ids, () => ({ style: s.key }) as Partial<DiagramObject>)}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {allLines && (
+        <Section title="Arrow">
+          <div className="grid two">
+            {ARROWS.map((a) => (
+              <button
+                key={a.key}
+                className="chip"
+                onClick={() => updateMany(ids, () => ({ arrow: a.key }) as Partial<DiagramObject>)}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {allVertices && (
+        <>
+          <Section title="Vertex shape">
+            <div className="grid two">
+              {VERTEX_SHAPES.map((s) => (
+                <button
+                  key={s}
+                  className="chip"
+                  onClick={() => updateMany(ids, () => ({ shape: s }) as Partial<DiagramObject>)}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </Section>
+          <Section title="Fill">
+            <div className="grid two">
+              {VERTEX_FILLS.map((f) => (
+                <button
+                  key={f}
+                  className="chip"
+                  onClick={() => updateMany(ids, () => ({ fill: f }) as Partial<DiagramObject>)}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+          </Section>
+        </>
+      )}
+
+      {!allSameKind && (
+        <div className="panel-section">
+          <div className="panel-hint">
+            Mixed object types — use the marquee or shift+click to refine the selection.
+          </div>
+        </div>
+      )}
+
+      <div className="panel-section">
+        <button className="btn danger" onClick={() => removeMany(ids)}>
+          Delete {selected.length} objects
         </button>
       </div>
     </div>
@@ -339,10 +496,12 @@ function ColorPicker({
   value,
   onChange,
   allowTransparent,
+  placeholder,
 }: {
   value: string;
   onChange: (c: string) => void;
   allowTransparent?: boolean;
+  placeholder?: string;
 }) {
   const swatches = ["#111111", "#ffffff", "#e53e3e", "#dd6b20", "#d69e2e", "#38a169", "#3182ce", "#805ad5", "#d53f8c"];
   const isTransparent = value === "transparent" || value === "none";
@@ -350,13 +509,14 @@ function ColorPicker({
     <div className="color-row">
       <input
         type="color"
-        value={isTransparent ? "#ffffff" : value}
+        value={isTransparent ? "#ffffff" : value || "#111111"}
         onChange={(e) => onChange(e.target.value)}
       />
       <input
         className="text"
         type="text"
         value={value}
+        placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
       />
       {allowTransparent && (
