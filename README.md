@@ -1,32 +1,63 @@
 # FeynSketch
 
-Sketch Feynman diagrams by hand and turn them into publication-quality,
-editable diagrams in the browser.
+Build publication-quality Feynman diagrams in the browser.
 
 ## Features
 
-- **Two-mode workspace** — a `Draw` canvas for freehand sketching and an `Edit`
-  canvas for precise editing.
-- **Stroke → diagram conversion** — the `Convert → editable` button analyses
-  each hand-drawn stroke and classifies it as:
-  - a straight / curved solid line
-  - a wiggly photon line
-  - a curly gluon line
-  It then snaps line endpoints into shared **vertices**.
-- **Line styling** — solid, dashed, dotted (ghost), double, wiggly (photon),
-  curly (gluon), with arrowheads at the start, middle, or end. Amplitude and
-  wavelength of wiggly/curly lines are adjustable.
-- **Anchor-point editing** — drag anchors on a selected line to curve it, or
-  double-click a selected line to add a new anchor.
-- **Shapes** — circle, ellipse, square, rectangle, triangle, diamond. Each
-  can be stretched, rotated, recoloured (stroke and fill).
+- **Editor-first canvas** — direct manipulation of lines, shapes, vertices,
+  and LaTeX labels, all rendered as smooth SVG.
+- **Smooth curves through anchors** — every line uses a centripetal
+  Catmull-Rom spline that passes through every anchor point. A single
+  off-axis anchor between two endpoints traces a clean arc; many anchors
+  give a continuously curving path with no kinks.
+- **Lines** — solid, dashed, dotted (ghost), double, wiggly (photon),
+  curly (gluon). Arrows at start / middle / end with a forward / backward
+  direction toggle. Wiggly amplitude / wavelength and double-line spacing
+  are independently configurable.
+- **Gluon coils** — circular cycloid loops auto-tuned so a whole number
+  of cycles fit between the endpoints, so the line always lands cleanly
+  on the vertex.
+- **Shapes** — circle, ellipse, square, rect, triangle, diamond, cross.
+  Stretch, rotate, recolour fill and stroke.
 - **Vertices** — circle or square, filled / open / outline only, any size
-  or colour.
-- **LaTeX labels** — insert a label from a dialog (with live KaTeX preview),
-  then drag, recolour, resize, or change its font.
-- **Export** — PNG, SVG (vector), PDF, or a JSON project file for re-editing.
-- **Save / load** — projects are kept in `localStorage` and can be re-opened
-  from the `Projects` menu; they can also be imported or exported as JSON.
+  or colour. Vertices are explicit objects: lines do not auto-create
+  them on conversion.
+- **LaTeX labels** — KaTeX-rendered labels with live preview, draggable,
+  recolourable, with adjustable font.
+- **Multi-select & marquee** — drag from empty space to box-select; Shift
+  to add or remove from a selection.
+- **Grouping** — Cmd/Ctrl-G groups the selection so it moves, copies, and
+  styles as one. Shift-Cmd/Ctrl-G ungroups.
+- **Layer ordering** — bring forward / send backward / bring to front /
+  send to back, both in the Edit menu / property panel and via Cmd/Ctrl-]
+  / [ (add Shift for front / back).
+- **Clipboard** — Cmd/Ctrl-C, X, V copy, cut, paste (with offset). Cmd/Ctrl-D
+  duplicates.
+- **Undo / Redo** — Cmd/Ctrl-Z and Shift-Cmd/Ctrl-Z (or Cmd/Ctrl-Y), 100
+  steps deep. Drags and slider sweeps are single steps.
+- **Anchor editing** — double-click a selected line to add an anchor;
+  Alt-click an interior anchor to remove it.
+- **Snap-to-grid** — toolbar toggle plus settings; configurable grid size.
+- **Export** — PNG, SVG, PDF (DPI presets + slider, transparent background
+  option) or a JSON project file. Uses the File System Access API for
+  save-location pickers when available.
+- **Save / load** — projects are kept in `localStorage` and re-openable
+  from the File menu; can also be imported / exported as JSON.
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+|--------|----------|
+| Undo / Redo | ⌘Z · ⇧⌘Z (or ⌘Y) |
+| Copy / Cut / Paste | ⌘C · ⌘X · ⌘V |
+| Duplicate | ⌘D |
+| Select all | ⌘A |
+| Group / Ungroup | ⌘G · ⇧⌘G |
+| Bring forward / Send backward | ⌘] · ⌘[ |
+| Bring to front / Send to back | ⇧⌘] · ⇧⌘[ |
+| Delete selection | Backspace · Delete |
+
+(`⌘` = Cmd on macOS, Ctrl elsewhere.)
 
 ## Running locally
 
@@ -40,29 +71,10 @@ Then open http://localhost:5173.
 ### Scripts
 
 - `npm run dev` — start the Vite dev server
-- `npm run build` — produce an optimised production build in `dist/`
+- `npm run build` — produce a production build in `dist/`
 - `npm run preview` — preview the production build locally
-- `npm run typecheck` — run the TypeScript compiler in check mode
-
-## How it works
-
-- The drawing canvas captures pointer input as a sequence of polyline strokes.
-- On conversion, each stroke is:
-  1. smoothed into a low-frequency **guide** path via arc-length averaging
-  2. compared with the raw stroke to measure residual oscillation amplitude
-     and zero-crossing count
-  3. classified into `solid` / `wiggly` / `curly` using a ratio-of-lengths +
-     oscillation heuristic
-  4. simplified into a small set of control points using RDP
-- Wiggly and curly lines are re-rendered as uniform sine-wave / cycloid paths
-  along the control-point backbone, so the output always has perfectly spaced
-  oscillations regardless of how shaky the input was.
-- Endpoints within a small radius are clustered into shared **vertex** objects
-  so the line network is continuous.
+- `npm run typecheck` — TypeScript check
 
 ## Tech stack
 
-- Vite + React + TypeScript
-- [KaTeX](https://katex.org/) for LaTeX rendering
-- [zustand](https://github.com/pmndrs/zustand) for state
-- [jsPDF](https://github.com/parallax/jsPDF) for PDF export
+Vite · React · TypeScript · KaTeX · zustand · jsPDF.

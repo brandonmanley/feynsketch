@@ -7,11 +7,13 @@ export function LineRenderer({
   selected,
   onPointerDown,
   onAnchorPointerDown,
+  onAnchorAltClick,
 }: {
   line: LineObject;
   selected?: boolean;
   onPointerDown?: (e: React.PointerEvent) => void;
   onAnchorPointerDown?: (index: number, e: React.PointerEvent) => void;
+  onAnchorAltClick?: (index: number, e: React.MouseEvent) => void;
 }) {
   const stroke = line.color;
   const sw = line.strokeWidth;
@@ -40,7 +42,7 @@ export function LineRenderer({
       />
     );
   } else if (line.style === "double") {
-    const { a, b } = doublePath(line.points, 2.5);
+    const { a, b } = doublePath(line.points, line.doubleSpacing ?? 5);
     body = (
       <g>
         <path d={a} fill="none" stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" />
@@ -85,16 +87,25 @@ export function LineRenderer({
   }
 
   const arrows: React.ReactNode[] = [];
+  const dirSign = line.arrowDirection === "backward" ? -1 : 1;
   const makeArrow = (t: number, key: string) => {
     const at = pointAtFraction(line.points, t);
     if (!at) return null;
-    return <path key={key} d={arrowMarkerPath(at.p, at.tan, Math.max(10, sw * 4))} fill={stroke} stroke={stroke} />;
+    const tan = { x: at.tan.x * dirSign, y: at.tan.y * dirSign };
+    return (
+      <path
+        key={key}
+        d={arrowMarkerPath(at.p, tan, Math.max(10, sw * 4))}
+        fill={stroke}
+        stroke={stroke}
+      />
+    );
   };
   if (line.arrow === "start") arrows.push(makeArrow(0.02, "as"));
   if (line.arrow === "middle") arrows.push(makeArrow(0.5, "am"));
   if (line.arrow === "end") arrows.push(makeArrow(0.98, "ae"));
 
-  // invisible thicker hit target to make selection easy
+  // Invisible thicker hit target for easy selection
   const hitPath = pathFromPoints(line.points, true);
 
   return (
@@ -117,10 +128,17 @@ export function LineRenderer({
                 strokeWidth={1.5}
                 onPointerDown={(e) => {
                   e.stopPropagation();
+                  if (e.altKey && !isEndpoint) {
+                    // Alt-click on a middle anchor deletes it.
+                    onAnchorAltClick?.(i, e);
+                    return;
+                  }
                   onAnchorPointerDown?.(i, e);
                 }}
-                style={{ cursor: "grab" }}
-              />
+                style={{ cursor: isEndpoint ? "grab" : "grab" }}
+              >
+                {!isEndpoint && <title>Drag to reshape; Alt-click to delete this anchor</title>}
+              </circle>
             );
           })}
         </g>

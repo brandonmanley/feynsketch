@@ -10,34 +10,47 @@ export type LineStyle =
 
 export type ArrowPosition = "none" | "start" | "middle" | "end";
 
+export type ArrowDirection = "forward" | "backward";
+
 export type VertexShape = "circle" | "square";
 export type VertexFill = "filled" | "open" | "none";
 
 export interface LineObject {
   id: string;
   kind: "line";
-  // control points along the line; first and last are endpoints, middle are anchors
-  // rendering uses a cardinal spline (catmull-rom) when there are 3+ points
+  // Control points along the line; first and last are endpoints, middle are anchors.
+  // Rendering uses a cubic spline that passes through every point.
   points: Point[];
   style: LineStyle;
   arrow: ArrowPosition;
+  arrowDirection: ArrowDirection; // direction the middle / end arrow points
   color: string;
   strokeWidth: number;
-  // for wiggly (photon): amplitude and wavelength
+  // For wiggly (photon) and curly (gluon) lines.
   amplitude: number;
   wavelength: number;
-  // connected vertex ids (optional)
+  // For double lines: distance between the two parallel strands.
+  doubleSpacing: number;
+  // Optional grouping id; objects with the same groupId move/copy together.
+  groupId?: string;
+  // Connected vertex ids (optional, set explicitly by the user)
   startVertexId?: string;
   endVertexId?: string;
 }
 
-export type ShapeKind = "circle" | "square" | "triangle" | "ellipse" | "rect" | "diamond";
+export type ShapeKind =
+  | "circle"
+  | "square"
+  | "triangle"
+  | "ellipse"
+  | "rect"
+  | "diamond"
+  | "cross";
 
 export interface ShapeObject {
   id: string;
   kind: "shape";
   shape: ShapeKind;
-  // bounding box center + size
   x: number;
   y: number;
   width: number;
@@ -46,6 +59,7 @@ export interface ShapeObject {
   fill: string;
   stroke: string;
   strokeWidth: number;
+  groupId?: string;
 }
 
 export interface VertexObject {
@@ -57,6 +71,7 @@ export interface VertexObject {
   fill: VertexFill;
   color: string;
   size: number;
+  groupId?: string;
 }
 
 export interface LabelObject {
@@ -68,18 +83,12 @@ export interface LabelObject {
   color: string;
   fontSize: number;
   fontFamily: string;
+  groupId?: string;
 }
 
 export type DiagramObject = LineObject | ShapeObject | VertexObject | LabelObject;
 
-export type Tool = "select" | "draw" | "line" | "shape" | "vertex" | "label";
-
-export type Mode = "draw" | "edit";
-
-export interface Stroke {
-  id: string;
-  points: Point[];
-}
+export type Tool = "select" | "line" | "shape" | "vertex" | "label";
 
 export interface Settings {
   snap: boolean;
@@ -88,9 +97,7 @@ export interface Settings {
 }
 
 export interface DiagramState {
-  mode: Mode;
   objects: DiagramObject[];
-  strokes: Stroke[];
   selectedIds: string[];
   tool: Tool;
   pendingShape: ShapeKind | null;

@@ -1,5 +1,13 @@
 import { useStore } from "../store";
-import type { ArrowPosition, DiagramObject, LineStyle, ShapeKind, VertexFill, VertexShape } from "../types";
+import type {
+  ArrowPosition,
+  DiagramObject,
+  LineObject,
+  LineStyle,
+  ShapeKind,
+  VertexFill,
+  VertexShape,
+} from "../types";
 
 const LINE_STYLES: { key: LineStyle; label: string }[] = [
   { key: "solid", label: "Solid" },
@@ -19,7 +27,15 @@ const ARROWS: { key: ArrowPosition; label: string }[] = [
 
 const VERTEX_SHAPES: VertexShape[] = ["circle", "square"];
 const VERTEX_FILLS: VertexFill[] = ["filled", "open", "none"];
-const SHAPE_KINDS: ShapeKind[] = ["circle", "ellipse", "square", "rect", "triangle", "diamond"];
+const SHAPE_KINDS: ShapeKind[] = [
+  "circle",
+  "ellipse",
+  "square",
+  "rect",
+  "triangle",
+  "diamond",
+  "cross",
+];
 
 function colorOf(o: DiagramObject): string {
   if (o.kind === "shape") return o.stroke;
@@ -41,9 +57,15 @@ export function PropertyPanel() {
   const removeMany = useStore((s) => s.removeMany);
   const pushHistory = useStore((s) => s.pushHistory);
 
+  const groupSelection = useStore((s) => s.groupSelection);
+  const ungroupSelection = useStore((s) => s.ungroupSelection);
+  const bringForward = useStore((s) => s.bringForward);
+  const sendBackward = useStore((s) => s.sendBackward);
+  const bringToFront = useStore((s) => s.bringToFront);
+  const sendToBack = useStore((s) => s.sendToBack);
+
   const selected = objects.filter((o) => selectedIds.includes(o.id));
 
-  // Wrappers that record an undo step before applying the change.
   const updateOne = (id: string, patch: Partial<DiagramObject>) => {
     pushHistory();
     updateObject(id, patch);
@@ -65,9 +87,11 @@ export function PropertyPanel() {
             <li>Drag from empty space to box-select multiple objects.</li>
             <li>Hold Shift to add/remove from a selection.</li>
             <li>Drag to move. Drag handles to resize.</li>
-            <li>On a selected line, double-click to add an anchor point.</li>
-            <li>Backspace or Delete removes the selected objects.</li>
-            <li>Cmd/Ctrl-Z to undo, Shift-Cmd/Ctrl-Z to redo.</li>
+            <li>On a selected line, double-click to add an anchor point; Alt-click to remove one.</li>
+            <li>Cmd/Ctrl-C / X / V — copy / cut / paste. Cmd/Ctrl-D — duplicate.</li>
+            <li>Cmd/Ctrl-G — group; Shift-Cmd/Ctrl-G — ungroup.</li>
+            <li>Cmd/Ctrl-]/[ — bring forward / send backward (add Shift for front/back).</li>
+            <li>Cmd/Ctrl-Z / Shift-Cmd/Ctrl-Z — undo / redo.</li>
           </ul>
         </div>
       </div>
@@ -78,9 +102,16 @@ export function PropertyPanel() {
     return (
       <MultiPanel
         selected={selected}
+        ids={selectedIds}
         updateGroup={updateGroup}
         beforeSlide={pushHistory}
         removeMany={removeMany}
+        groupSelection={groupSelection}
+        ungroupSelection={ungroupSelection}
+        bringForward={bringForward}
+        sendBackward={sendBackward}
+        bringToFront={bringToFront}
+        sendToBack={sendToBack}
       />
     );
   }
@@ -94,242 +125,28 @@ export function PropertyPanel() {
         {single.kind === "shape" && "Shape"}
         {single.kind === "vertex" && "Vertex"}
         {single.kind === "label" && "Label"}
+        {single.groupId && <span className="badge">grouped</span>}
       </div>
 
-      {single.kind === "line" && (
-        <>
-          <Section title="Line style">
-            <div className="grid two">
-              {LINE_STYLES.map((s) => (
-                <button
-                  key={s.key}
-                  className={`chip ${single.style === s.key ? "active" : ""}`}
-                  onClick={() => updateOne(single.id, { style: s.key })}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Arrow">
-            <div className="grid two">
-              {ARROWS.map((a) => (
-                <button
-                  key={a.key}
-                  className={`chip ${single.arrow === a.key ? "active" : ""}`}
-                  onClick={() => updateOne(single.id, { arrow: a.key })}
-                >
-                  {a.label}
-                </button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Color">
-            <ColorPicker
-              value={single.color}
-              onChange={(c) => updateOne(single.id, { color: c })}
-            />
-          </Section>
-          <Section title="Stroke width">
-            <SliderRow
-              value={single.strokeWidth}
-              min={0.5}
-              max={8}
-              step={0.5}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { strokeWidth: v })}
-            />
-          </Section>
-          {(single.style === "wiggly" || single.style === "curly") && (
-            <>
-              <Section title="Amplitude">
-                <SliderRow
-                  value={single.amplitude}
-                  min={2}
-                  max={30}
-                  step={0.5}
-                  beforeSlide={pushHistory}
-                  onChange={(v) => updateObject(single.id, { amplitude: v })}
-                />
-              </Section>
-              <Section title="Wavelength">
-                <SliderRow
-                  value={single.wavelength}
-                  min={8}
-                  max={60}
-                  step={0.5}
-                  beforeSlide={pushHistory}
-                  onChange={(v) => updateObject(single.id, { wavelength: v })}
-                />
-              </Section>
-            </>
-          )}
-          <Section title="Anchors">
-            <div className="panel-hint">
-              Drag the blue handles to reshape. Double-click on the line to add an anchor.
-            </div>
-            <button
-              className="btn"
-              onClick={() => {
-                const next = [single.points[0], single.points[single.points.length - 1]];
-                updateOne(single.id, { points: next });
-              }}
-            >
-              Reset to straight
-            </button>
-          </Section>
-        </>
-      )}
+      {single.kind === "line" && <LineEditor line={single} updateOne={updateOne} pushHistory={pushHistory} />}
+      {single.kind === "shape" && <ShapeEditor shape={single} updateOne={updateOne} pushHistory={pushHistory} />}
+      {single.kind === "vertex" && <VertexEditor vertex={single} updateOne={updateOne} pushHistory={pushHistory} />}
+      {single.kind === "label" && <LabelEditor label={single} updateOne={updateOne} pushHistory={pushHistory} />}
 
-      {single.kind === "shape" && (
-        <>
-          <Section title="Shape">
-            <div className="grid two">
-              {SHAPE_KINDS.map((s) => (
-                <button
-                  key={s}
-                  className={`chip ${single.shape === s ? "active" : ""}`}
-                  onClick={() => updateOne(single.id, { shape: s })}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Stroke color">
-            <ColorPicker value={single.stroke} onChange={(c) => updateOne(single.id, { stroke: c })} />
-          </Section>
-          <Section title="Fill color">
-            <ColorPicker
-              value={single.fill}
-              onChange={(c) => updateOne(single.id, { fill: c })}
-              allowTransparent
-            />
-          </Section>
-          <Section title="Width">
-            <SliderRow
-              value={single.width}
-              min={8}
-              max={400}
-              step={1}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { width: v })}
-            />
-          </Section>
-          <Section title="Height">
-            <SliderRow
-              value={single.height}
-              min={8}
-              max={400}
-              step={1}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { height: v })}
-            />
-          </Section>
-          <Section title="Rotation">
-            <SliderRow
-              value={single.rotation}
-              min={-180}
-              max={180}
-              step={1}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { rotation: v })}
-            />
-          </Section>
-          <Section title="Stroke width">
-            <SliderRow
-              value={single.strokeWidth}
-              min={0}
-              max={10}
-              step={0.5}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { strokeWidth: v })}
-            />
-          </Section>
-        </>
-      )}
+      <LayerSection
+        ids={[single.id]}
+        bringForward={bringForward}
+        sendBackward={sendBackward}
+        bringToFront={bringToFront}
+        sendToBack={sendToBack}
+      />
 
-      {single.kind === "vertex" && (
-        <>
-          <Section title="Vertex shape">
-            <div className="grid two">
-              {VERTEX_SHAPES.map((s) => (
-                <button
-                  key={s}
-                  className={`chip ${single.shape === s ? "active" : ""}`}
-                  onClick={() => updateOne(single.id, { shape: s })}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Fill">
-            <div className="grid two">
-              {VERTEX_FILLS.map((f) => (
-                <button
-                  key={f}
-                  className={`chip ${single.fill === f ? "active" : ""}`}
-                  onClick={() => updateOne(single.id, { fill: f })}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Color">
-            <ColorPicker value={single.color} onChange={(c) => updateOne(single.id, { color: c })} />
-          </Section>
-          <Section title="Size">
-            <SliderRow
-              value={single.size}
-              min={3}
-              max={30}
-              step={0.5}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { size: v })}
-            />
-          </Section>
-        </>
-      )}
-
-      {single.kind === "label" && (
-        <>
-          <Section title="LaTeX source">
-            <textarea
-              className="textarea"
-              rows={3}
-              value={single.latex}
-              onFocus={pushHistory}
-              onChange={(e) => updateObject(single.id, { latex: e.target.value })}
-            />
-          </Section>
-          <Section title="Color">
-            <ColorPicker value={single.color} onChange={(c) => updateOne(single.id, { color: c })} />
-          </Section>
-          <Section title="Font size">
-            <SliderRow
-              value={single.fontSize}
-              min={10}
-              max={48}
-              step={1}
-              beforeSlide={pushHistory}
-              onChange={(v) => updateObject(single.id, { fontSize: v })}
-            />
-          </Section>
-          <Section title="Font family">
-            <select
-              className="select"
-              value={single.fontFamily}
-              onChange={(e) => updateOne(single.id, { fontFamily: e.target.value })}
-            >
-              <option value="KaTeX_Main, serif">KaTeX / Serif</option>
-              <option value="Inter, system-ui, sans-serif">Sans-serif</option>
-              <option value="Georgia, serif">Georgia</option>
-              <option value='"Courier New", monospace'>Monospace</option>
-            </select>
-          </Section>
-        </>
+      {single.groupId && (
+        <Section title="Grouping">
+          <button className="btn" onClick={() => ungroupSelection([single.id])}>
+            Ungroup
+          </button>
+        </Section>
       )}
 
       <div className="panel-section">
@@ -341,25 +158,408 @@ export function PropertyPanel() {
   );
 }
 
+function LineEditor({
+  line,
+  updateOne,
+  pushHistory,
+}: {
+  line: LineObject;
+  updateOne: (id: string, patch: Partial<DiagramObject>) => void;
+  pushHistory: () => void;
+}) {
+  const updateObject = useStore((s) => s.updateObject);
+  const removeAnchor = useStore((s) => s.removeAnchor);
+  const showArrowDirection = line.arrow === "middle" || line.arrow === "end" || line.arrow === "start";
+  const interiorAnchorCount = Math.max(0, line.points.length - 2);
+  return (
+    <>
+      <Section title="Line style">
+        <div className="grid two">
+          {LINE_STYLES.map((s) => (
+            <button
+              key={s.key}
+              className={`chip ${line.style === s.key ? "active" : ""}`}
+              onClick={() => updateOne(line.id, { style: s.key })}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </Section>
+      <Section title="Arrow">
+        <div className="grid two">
+          {ARROWS.map((a) => (
+            <button
+              key={a.key}
+              className={`chip ${line.arrow === a.key ? "active" : ""}`}
+              onClick={() => updateOne(line.id, { arrow: a.key })}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+        {showArrowDirection && (
+          <div className="grid two" style={{ marginTop: 6 }}>
+            <button
+              className={`chip ${line.arrowDirection !== "backward" ? "active" : ""}`}
+              onClick={() => updateOne(line.id, { arrowDirection: "forward" })}
+            >
+              → forward
+            </button>
+            <button
+              className={`chip ${line.arrowDirection === "backward" ? "active" : ""}`}
+              onClick={() => updateOne(line.id, { arrowDirection: "backward" })}
+            >
+              ← backward
+            </button>
+          </div>
+        )}
+      </Section>
+      <Section title="Color">
+        <ColorPicker
+          value={line.color}
+          onChange={(c) => updateOne(line.id, { color: c })}
+        />
+      </Section>
+      <Section title="Stroke width">
+        <SliderRow
+          value={line.strokeWidth}
+          min={0.5}
+          max={8}
+          step={0.5}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(line.id, { strokeWidth: v })}
+        />
+      </Section>
+      {(line.style === "wiggly" || line.style === "curly") && (
+        <>
+          <Section title="Amplitude">
+            <SliderRow
+              value={line.amplitude}
+              min={2}
+              max={30}
+              step={0.5}
+              beforeSlide={pushHistory}
+              onChange={(v) => updateObject(line.id, { amplitude: v })}
+            />
+          </Section>
+          <Section title="Wavelength">
+            <SliderRow
+              value={line.wavelength}
+              min={6}
+              max={60}
+              step={0.5}
+              beforeSlide={pushHistory}
+              onChange={(v) => updateObject(line.id, { wavelength: v })}
+            />
+          </Section>
+        </>
+      )}
+      {line.style === "double" && (
+        <Section title="Double-line spacing">
+          <SliderRow
+            value={line.doubleSpacing ?? 5}
+            min={1}
+            max={20}
+            step={0.5}
+            beforeSlide={pushHistory}
+            onChange={(v) => updateObject(line.id, { doubleSpacing: v })}
+          />
+        </Section>
+      )}
+      <Section title="Anchors">
+        <div className="panel-hint">
+          Drag the blue handles to reshape. Double-click on the line to add an anchor.
+          Alt-click an interior anchor to delete it.
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button
+            className="btn"
+            disabled={interiorAnchorCount === 0}
+            onClick={() => {
+              const next = [line.points[0], line.points[line.points.length - 1]];
+              updateOne(line.id, { points: next });
+            }}
+          >
+            Reset to straight
+          </button>
+          <button
+            className="btn"
+            disabled={interiorAnchorCount === 0}
+            onClick={() => {
+              // Remove the last interior anchor
+              const idx = line.points.length - 2;
+              if (idx > 0) removeAnchor(line.id, idx);
+            }}
+          >
+            Remove last anchor
+          </button>
+        </div>
+        <div className="panel-hint" style={{ marginTop: 6 }}>
+          {interiorAnchorCount === 0
+            ? "No interior anchors yet."
+            : `${interiorAnchorCount} interior anchor${interiorAnchorCount === 1 ? "" : "s"}.`}
+        </div>
+      </Section>
+    </>
+  );
+}
+
+function ShapeEditor({
+  shape,
+  updateOne,
+  pushHistory,
+}: {
+  shape: import("../types").ShapeObject;
+  updateOne: (id: string, patch: Partial<DiagramObject>) => void;
+  pushHistory: () => void;
+}) {
+  const updateObject = useStore((s) => s.updateObject);
+  const isCross = shape.shape === "cross";
+  return (
+    <>
+      <Section title="Shape">
+        <div className="grid two">
+          {SHAPE_KINDS.map((s) => (
+            <button
+              key={s}
+              className={`chip ${shape.shape === s ? "active" : ""}`}
+              onClick={() => updateOne(shape.id, { shape: s })}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </Section>
+      <Section title={isCross ? "Color" : "Stroke color"}>
+        <ColorPicker value={shape.stroke} onChange={(c) => updateOne(shape.id, { stroke: c })} />
+      </Section>
+      {!isCross && (
+        <Section title="Fill color">
+          <ColorPicker
+            value={shape.fill}
+            onChange={(c) => updateOne(shape.id, { fill: c })}
+            allowTransparent
+          />
+        </Section>
+      )}
+      <Section title="Width">
+        <SliderRow
+          value={shape.width}
+          min={8}
+          max={400}
+          step={1}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(shape.id, { width: v })}
+        />
+      </Section>
+      <Section title="Height">
+        <SliderRow
+          value={shape.height}
+          min={8}
+          max={400}
+          step={1}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(shape.id, { height: v })}
+        />
+      </Section>
+      <Section title="Rotation">
+        <SliderRow
+          value={shape.rotation}
+          min={-180}
+          max={180}
+          step={1}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(shape.id, { rotation: v })}
+        />
+      </Section>
+      <Section title="Stroke width">
+        <SliderRow
+          value={shape.strokeWidth}
+          min={0}
+          max={10}
+          step={0.5}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(shape.id, { strokeWidth: v })}
+        />
+      </Section>
+    </>
+  );
+}
+
+function VertexEditor({
+  vertex,
+  updateOne,
+  pushHistory,
+}: {
+  vertex: import("../types").VertexObject;
+  updateOne: (id: string, patch: Partial<DiagramObject>) => void;
+  pushHistory: () => void;
+}) {
+  const updateObject = useStore((s) => s.updateObject);
+  return (
+    <>
+      <Section title="Vertex shape">
+        <div className="grid two">
+          {VERTEX_SHAPES.map((s) => (
+            <button
+              key={s}
+              className={`chip ${vertex.shape === s ? "active" : ""}`}
+              onClick={() => updateOne(vertex.id, { shape: s })}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </Section>
+      <Section title="Fill">
+        <div className="grid two">
+          {VERTEX_FILLS.map((f) => (
+            <button
+              key={f}
+              className={`chip ${vertex.fill === f ? "active" : ""}`}
+              onClick={() => updateOne(vertex.id, { fill: f })}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+      </Section>
+      <Section title="Color">
+        <ColorPicker value={vertex.color} onChange={(c) => updateOne(vertex.id, { color: c })} />
+      </Section>
+      <Section title="Size">
+        <SliderRow
+          value={vertex.size}
+          min={3}
+          max={30}
+          step={0.5}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(vertex.id, { size: v })}
+        />
+      </Section>
+    </>
+  );
+}
+
+function LabelEditor({
+  label,
+  updateOne,
+  pushHistory,
+}: {
+  label: import("../types").LabelObject;
+  updateOne: (id: string, patch: Partial<DiagramObject>) => void;
+  pushHistory: () => void;
+}) {
+  const updateObject = useStore((s) => s.updateObject);
+  return (
+    <>
+      <Section title="LaTeX source">
+        <textarea
+          className="textarea"
+          rows={3}
+          value={label.latex}
+          onFocus={pushHistory}
+          onChange={(e) => updateObject(label.id, { latex: e.target.value })}
+        />
+      </Section>
+      <Section title="Color">
+        <ColorPicker value={label.color} onChange={(c) => updateOne(label.id, { color: c })} />
+      </Section>
+      <Section title="Font size">
+        <SliderRow
+          value={label.fontSize}
+          min={10}
+          max={48}
+          step={1}
+          beforeSlide={pushHistory}
+          onChange={(v) => updateObject(label.id, { fontSize: v })}
+        />
+      </Section>
+      <Section title="Font family">
+        <select
+          className="select"
+          value={label.fontFamily}
+          onChange={(e) => updateOne(label.id, { fontFamily: e.target.value })}
+        >
+          <option value="KaTeX_Main, serif">KaTeX / Serif</option>
+          <option value="Inter, system-ui, sans-serif">Sans-serif</option>
+          <option value="Georgia, serif">Georgia</option>
+          <option value='"Courier New", monospace'>Monospace</option>
+        </select>
+      </Section>
+    </>
+  );
+}
+
+function LayerSection({
+  ids,
+  bringForward,
+  sendBackward,
+  bringToFront,
+  sendToBack,
+}: {
+  ids: string[];
+  bringForward: (ids: string[]) => void;
+  sendBackward: (ids: string[]) => void;
+  bringToFront: (ids: string[]) => void;
+  sendToBack: (ids: string[]) => void;
+}) {
+  return (
+    <Section title="Layer order">
+      <div className="grid two">
+        <button className="chip" onClick={() => bringForward(ids)}>
+          Bring forward
+        </button>
+        <button className="chip" onClick={() => sendBackward(ids)}>
+          Send backward
+        </button>
+        <button className="chip" onClick={() => bringToFront(ids)}>
+          Bring to front
+        </button>
+        <button className="chip" onClick={() => sendToBack(ids)}>
+          Send to back
+        </button>
+      </div>
+    </Section>
+  );
+}
+
 function MultiPanel({
   selected,
+  ids,
   updateGroup,
   beforeSlide,
   removeMany,
+  groupSelection,
+  ungroupSelection,
+  bringForward,
+  sendBackward,
+  bringToFront,
+  sendToBack,
 }: {
   selected: DiagramObject[];
+  ids: string[];
   updateGroup: (ids: string[], patcher: (o: DiagramObject) => Partial<DiagramObject>) => void;
   beforeSlide: () => void;
   removeMany: (ids: string[]) => void;
+  groupSelection: (ids: string[]) => void;
+  ungroupSelection: (ids: string[]) => void;
+  bringForward: (ids: string[]) => void;
+  sendBackward: (ids: string[]) => void;
+  bringToFront: (ids: string[]) => void;
+  sendToBack: (ids: string[]) => void;
 }) {
   const updateMany = useStore((s) => s.updateMany);
-  const ids = selected.map((o) => o.id);
   const allSameKind = selected.every((o) => o.kind === selected[0].kind);
   const allLines = selected.every((o) => o.kind === "line");
   const allShapes = selected.every((o) => o.kind === "shape");
   const allVertices = selected.every((o) => o.kind === "vertex");
   const colors = new Set(selected.map(colorOf));
   const sharedColor = colors.size === 1 ? Array.from(colors)[0] : "";
+  const groupIds = new Set(selected.map((o) => o.groupId).filter(Boolean));
+  const allInOneGroup = groupIds.size === 1 && selected.every((o) => o.groupId);
+  const someGrouped = selected.some((o) => o.groupId);
 
   return (
     <div className="panel">
@@ -423,6 +623,20 @@ function MultiPanel({
               </button>
             ))}
           </div>
+          <div className="grid two" style={{ marginTop: 6 }}>
+            <button
+              className="chip"
+              onClick={() => updateGroup(ids, () => ({ arrowDirection: "forward" }) as Partial<DiagramObject>)}
+            >
+              → forward
+            </button>
+            <button
+              className="chip"
+              onClick={() => updateGroup(ids, () => ({ arrowDirection: "backward" }) as Partial<DiagramObject>)}
+            >
+              ← backward
+            </button>
+          </div>
         </Section>
       )}
 
@@ -464,6 +678,33 @@ function MultiPanel({
           </div>
         </div>
       )}
+
+      <Section title="Grouping">
+        <div className="grid two">
+          <button
+            className="chip"
+            disabled={selected.length < 2 || allInOneGroup}
+            onClick={() => groupSelection(ids)}
+          >
+            Group
+          </button>
+          <button
+            className="chip"
+            disabled={!someGrouped}
+            onClick={() => ungroupSelection(ids)}
+          >
+            Ungroup
+          </button>
+        </div>
+      </Section>
+
+      <LayerSection
+        ids={ids}
+        bringForward={bringForward}
+        sendBackward={sendBackward}
+        bringToFront={bringToFront}
+        sendToBack={sendToBack}
+      />
 
       <div className="panel-section">
         <button className="btn danger" onClick={() => removeMany(ids)}>

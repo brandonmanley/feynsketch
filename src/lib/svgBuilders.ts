@@ -1,49 +1,58 @@
 import type { Point } from "../types";
-import { pathFromPoints, sampleByArcLength, totalLength } from "./geometry";
+import { pathFromPoints, sampleSmoothCurve, smoothCurvePointAtFraction } from "./geometry";
 
-// Build a sine-wave "photon" path that follows an arbitrary polyline.
-// amplitude and wavelength control shape. The wave is drawn perpendicular to the local tangent.
-// The effective wavelength is rounded so the wave completes whole cycles along the path,
-// guaranteeing the curve starts and ends exactly on the polyline endpoints.
-export function wigglyPath(points: Point[], wavelength = 18, amplitude = 8): string {
+/**
+ * Build a sine-wave (photon) path that follows the smooth curve through the
+ * given control points. The wavelength is rounded so the wave completes whole
+ * cycles along the curve, guaranteeing the curve starts and ends exactly at
+ * the endpoints.
+ */
+export function wigglyPath(points: Point[], wavelength = 11, amplitude = 5): string {
   if (points.length < 2) return "";
-  const L = totalLength(points);
+  const samples = sampleSmoothCurve(points, Math.min(2, Math.max(0.6, wavelength / 16)));
+  if (samples.length < 2) return "";
+  const L = samples[samples.length - 1].s;
   if (L <= 0) return "";
   const cycles = Math.max(1, Math.round(L / wavelength));
   const effWavelength = L / cycles;
-  const step = Math.min(2, Math.max(0.75, effWavelength / 16));
-  const samples = sampleByArcLength(points, step);
-  if (samples.length < 2) return "";
   const twoPi = Math.PI * 2;
   const pts: Point[] = samples.map(({ p, n, s }) => {
     const a = amplitude * Math.sin((s / effWavelength) * twoPi);
     return { x: p.x + n.x * a, y: p.y + n.y * a };
   });
-  // Force the first/last sample to land exactly on the path endpoints.
   pts[0] = { ...samples[0].p };
   pts[pts.length - 1] = { ...samples[samples.length - 1].p };
   return pathFromPoints(pts, true);
 }
 
-// Build a "gluon" curly path - a series of loops/coils along the path.
-// We use a parametric cycloid-like curve: x = s - r*sin(theta), y = r*cos(theta)
-// Transformed into tangent/normal frame.
-// As with wigglyPath, the wavelength is adjusted so the curve completes whole
-// loops along the path and lands exactly on the endpoints.
-export function curlyPath(points: Point[], wavelength = 22, amplitude = 10): string {
+/**
+ * Build a "gluon" curly path: a series of clearly visible, evenly-spaced
+ * circular loops along the smooth curve.
+ *
+ * The loop is parametrised so that each cycle traces a near-circle on one
+ * side of the path, similar to publication-quality QCD diagrams (e.g.
+ * TikZ-Feynman). The wavelength is auto-tuned so the loops complete whole
+ * cycles, so the curve starts and ends exactly at the path endpoints.
+ */
+export function curlyPath(points: Point[], wavelength = 11, amplitude = 6): string {
   if (points.length < 2) return "";
-  const L = totalLength(points);
+  const samples = sampleSmoothCurve(points, Math.min(0.9, Math.max(0.35, wavelength / 24)));
+  if (samples.length < 2) return "";
+  const L = samples[samples.length - 1].s;
   if (L <= 0) return "";
   const cycles = Math.max(1, Math.round(L / wavelength));
   const effWavelength = L / cycles;
-  const step = Math.min(1.2, Math.max(0.4, effWavelength / 30));
-  const samples = sampleByArcLength(points, step);
-  if (samples.length < 2) return "";
   const twoPi = Math.PI * 2;
+
+  // Tighter loops: a near-circular cycloid that progresses slowly along the
+  // path (so loops are clearly visible) but doesn't bunch up.
+  // along: -amplitude * sin(theta)   (oscillates ±amplitude in the path direction)
+  // across: amplitude * (1 - cos(theta)) (rises smoothly to 2*amplitude perpendicular)
+  // Together these trace a circle of radius `amplitude` on one side of the path.
   const pts: Point[] = samples.map(({ p, t, n, s }) => {
     const theta = (s / effWavelength) * twoPi;
-    const along = -amplitude * 0.55 * Math.sin(theta);
-    const across = amplitude * Math.cos(theta) - amplitude;
+    const along = -amplitude * Math.sin(theta);
+    const across = amplitude * (1 - Math.cos(theta));
     return {
       x: p.x + t.x * along + n.x * across,
       y: p.y + t.y * along + n.y * across,
@@ -54,27 +63,18 @@ export function curlyPath(points: Point[], wavelength = 22, amplitude = 10): str
   return pathFromPoints(pts, true);
 }
 
-// Double-line path: produce two parallel offset paths.
-export function doublePath(points: Point[], offset = 3): { a: string; b: string } {
+/** Two parallel lines offset by `offset/2` to either side of the smooth curve. */
+export function doublePath(points: Point[], offset = 5): { a: string; b: string } {
   if (points.length < 2) return { a: "", b: "" };
-  const samples = sampleByArcLength(points, 2);
-  const aPts = samples.map(({ p, n }) => ({ x: p.x + n.x * offset, y: p.y + n.y * offset }));
-  const bPts = samples.map(({ p, n }) => ({ x: p.x - n.x * offset, y: p.y - n.y * offset }));
+  const samples = sampleSmoothCurve(points, 1.5);
+  if (samples.length < 2) return { a: "", b: "" };
+  const half = offset / 2;
+  const aPts = samples.map(({ p, n }) => ({ x: p.x + n.x * half, y: p.y + n.y * half }));
+  const bPts = samples.map(({ p, n }) => ({ x: p.x - n.x * half, y: p.y - n.y * half }));
   return { a: pathFromPoints(aPts, true), b: pathFromPoints(bPts, true) };
 }
 
-// Return point and tangent at arc-length fraction t in [0,1]
-export function pointAtFraction(points: Point[], t: number): { p: Point; tan: Point } | null {
-  if (points.length < 2) return null;
-  const L = totalLength(points);
-  const target = Math.min(Math.max(t, 0), 1) * L;
-  const samples = sampleByArcLength(points, Math.max(1, L / 200));
-  let best = samples[0];
-  for (const s of samples) if (Math.abs(s.s - target) < Math.abs(best.s - target)) best = s;
-  return { p: best.p, tan: best.t };
-}
-
-// Arrowhead triangle SVG path centered at p, pointing in tangent direction tan.
+/** Arrowhead triangle SVG path centered at p, pointing in tangent direction tan. */
 export function arrowMarkerPath(p: Point, tan: Point, size = 10): string {
   const nx = -tan.y;
   const ny = tan.x;
@@ -83,4 +83,9 @@ export function arrowMarkerPath(p: Point, tan: Point, size = 10): string {
   const l = { x: back.x + nx * size * 0.35, y: back.y + ny * size * 0.35 };
   const r = { x: back.x - nx * size * 0.35, y: back.y - ny * size * 0.35 };
   return `M ${tip.x} ${tip.y} L ${l.x} ${l.y} L ${r.x} ${r.y} Z`;
+}
+
+/** Find a point and tangent on the smooth curve at arc-length fraction t. */
+export function pointAtFraction(points: Point[], t: number): { p: Point; tan: Point } | null {
+  return smoothCurvePointAtFraction(points, t);
 }

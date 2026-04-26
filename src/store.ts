@@ -3,11 +3,9 @@ import type {
   DiagramObject,
   DiagramState,
   LineObject,
-  Mode,
   Settings,
   ShapeKind,
   ShapeObject,
-  Stroke,
   Tool,
   VertexObject,
   LabelObject,
@@ -50,7 +48,6 @@ function persistSettings(s: Settings) {
 
 interface Snapshot {
   objects: DiagramObject[];
-  strokes: Stroke[];
 }
 
 interface HistoryState {
@@ -58,13 +55,13 @@ interface HistoryState {
   future: Snapshot[];
 }
 
+interface ClipboardState {
+  clipboard: DiagramObject[];
+}
+
 interface Actions {
-  setMode: (mode: Mode) => void;
   setTool: (tool: Tool) => void;
   setPendingShape: (s: ShapeKind | null) => void;
-
-  addStroke: (stroke: Stroke) => void;
-  clearStrokes: () => void;
 
   setObjects: (objs: DiagramObject[]) => void;
   addObject: (obj: DiagramObject) => void;
@@ -72,9 +69,28 @@ interface Actions {
   updateMany: (ids: string[], patcher: (obj: DiagramObject) => Partial<DiagramObject>) => void;
   removeObject: (id: string) => void;
   removeMany: (ids: string[]) => void;
+  removeAnchor: (lineId: string, index: number) => void;
+
   select: (id: string | null) => void;
   setSelection: (ids: string[]) => void;
   toggleSelection: (id: string) => void;
+  /** Expand a selection to include all sibling members of any group it touches. */
+  expandSelectionToGroups: (ids: string[]) => string[];
+
+  /** Layer ordering. */
+  bringForward: (ids: string[]) => void;
+  sendBackward: (ids: string[]) => void;
+  bringToFront: (ids: string[]) => void;
+  sendToBack: (ids: string[]) => void;
+
+  /** Grouping. */
+  groupSelection: (ids: string[]) => void;
+  ungroupSelection: (ids: string[]) => void;
+
+  /** Clipboard. */
+  copy: (ids: string[]) => void;
+  cut: (ids: string[]) => void;
+  paste: (offsetX?: number, offsetY?: number) => string[];
 
   addLabel: (latex: string, x: number, y: number) => LabelObject;
   addShape: (shape: ShapeKind, x: number, y: number) => ShapeObject;
@@ -87,53 +103,51 @@ interface Actions {
 
   setSettings: (patch: Partial<Settings>) => void;
 
-  /** Push the current (objects, strokes) onto the undo stack. Call BEFORE
-   *  performing an undoable change (or before starting a drag). */
   pushHistory: () => void;
   undo: () => void;
   redo: () => void;
-  canUndo: () => boolean;
-  canRedo: () => boolean;
 
   loadState: (s: Partial<DiagramState>) => void;
   reset: () => void;
 }
 
 const initial: DiagramState = {
-  mode: "draw",
   objects: [],
-  strokes: [],
   selectedIds: [],
-  tool: "draw",
+  tool: "select",
   pendingShape: null,
   settings: loadSettings(),
 };
 
 const initialHistory: HistoryState = { past: [], future: [] };
+const initialClipboard: ClipboardState = { clipboard: [] };
 
-function snapshot(s: { objects: DiagramObject[]; strokes: Stroke[] }): Snapshot {
-  return {
-    objects: s.objects.map((o) => structuredClone(o)),
-    strokes: s.strokes.map((st) => ({ id: st.id, points: st.points.map((p) => ({ ...p })) })),
-  };
+function snapshot(s: { objects: DiagramObject[] }): Snapshot {
+  return { objects: s.objects.map((o) => structuredClone(o)) };
 }
 
-export const useStore = create<DiagramState & HistoryState & Actions>((set, get) => ({
+/** Default visual values for each line style — chosen so wiggly photons
+ *  and curly gluons look like publication QCD diagrams. */
+function defaultsFor(style: LineStyle): { amplitude: number; wavelength: number; doubleSpacing: number } {
+  switch (style) {
+    case "wiggly":
+      return { amplitude: 5, wavelength: 11, doubleSpacing: 4 };
+    case "curly":
+      return { amplitude: 6, wavelength: 11, doubleSpacing: 4 };
+    case "double":
+      return { amplitude: 5, wavelength: 11, doubleSpacing: 5 };
+    default:
+      return { amplitude: 5, wavelength: 11, doubleSpacing: 4 };
+  }
+}
+
+export const useStore = create<DiagramState & HistoryState & ClipboardState & Actions>((set, get) => ({
   ...initial,
   ...initialHistory,
+  ...initialClipboard,
 
-  setMode: (mode) => set({ mode }),
   setTool: (tool) => set({ tool }),
   setPendingShape: (pendingShape) => set({ pendingShape }),
-
-  addStroke: (stroke) => {
-    get().pushHistory();
-    set((s) => ({ strokes: [...s.strokes, stroke] }));
-  },
-  clearStrokes: () => {
-    get().pushHistory();
-    set({ strokes: [] });
-  },
 
   setObjects: (objects) => {
     get().pushHistory();
@@ -143,8 +157,8 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
     get().pushHistory();
     set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
   },
-  // updateObject and updateMany are intentionally NOT auto-history; drag
-  // handlers call pushHistory() once at the start of the drag.
+  // updateObject / updateMany do NOT auto-history; drag handlers and slider
+  // pointer-downs call pushHistory() once at the start of the interaction.
   updateObject: (id, patch) =>
     set((s) => ({
       objects: s.objects.map((o) => (o.id === id ? ({ ...o, ...patch } as DiagramObject) : o)),
@@ -166,6 +180,7 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
     }));
   },
   removeMany: (ids) => {
+    if (ids.length === 0) return;
     get().pushHistory();
     set((s) => {
       const remove = new Set(ids);
@@ -175,16 +190,176 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
       };
     });
   },
+  removeAnchor: (lineId, index) => {
+    const obj = get().objects.find((o) => o.id === lineId);
+    if (!obj || obj.kind !== "line") return;
+    if (obj.points.length <= 2) return;
+    if (index <= 0 || index >= obj.points.length - 1) return; // never delete the endpoints
+    get().pushHistory();
+    set((s) => ({
+      objects: s.objects.map((o) =>
+        o.id === lineId && o.kind === "line"
+          ? { ...o, points: o.points.filter((_, i) => i !== index) }
+          : o
+      ),
+    }));
+  },
 
-  select: (id) => set({ selectedIds: id ? [id] : [] }),
-  setSelection: (ids) => set({ selectedIds: ids }),
+  select: (id) => set({ selectedIds: id ? get().expandSelectionToGroups([id]) : [] }),
+  setSelection: (ids) => set({ selectedIds: get().expandSelectionToGroups(ids) }),
   toggleSelection: (id) =>
     set((s) => {
-      if (s.selectedIds.includes(id)) {
-        return { selectedIds: s.selectedIds.filter((x) => x !== id) };
+      const inSel = s.selectedIds.includes(id);
+      if (inSel) {
+        // Remove this id (and any siblings if it's part of a group)
+        const obj = s.objects.find((o) => o.id === id);
+        const removeIds = new Set<string>();
+        removeIds.add(id);
+        if (obj?.groupId) {
+          for (const o of s.objects) if (o.groupId === obj.groupId) removeIds.add(o.id);
+        }
+        return { selectedIds: s.selectedIds.filter((sid) => !removeIds.has(sid)) };
       }
-      return { selectedIds: [...s.selectedIds, id] };
+      const additions = get().expandSelectionToGroups([id]);
+      const merged = Array.from(new Set([...s.selectedIds, ...additions]));
+      return { selectedIds: merged };
     }),
+  expandSelectionToGroups: (ids) => {
+    const all = get().objects;
+    const idSet = new Set(ids);
+    const groups = new Set<string>();
+    for (const o of all) {
+      if (idSet.has(o.id) && o.groupId) groups.add(o.groupId);
+    }
+    if (groups.size === 0) return ids.slice();
+    const out = new Set(ids);
+    for (const o of all) {
+      if (o.groupId && groups.has(o.groupId)) out.add(o.id);
+    }
+    return Array.from(out);
+  },
+
+  bringForward: (ids) => {
+    if (ids.length === 0) return;
+    get().pushHistory();
+    set((s) => {
+      const arr = s.objects.slice();
+      const sel = new Set(ids);
+      // walk from end-1 to 0; if obj at i is selected and obj at i+1 is not, swap.
+      for (let i = arr.length - 2; i >= 0; i--) {
+        if (sel.has(arr[i].id) && !sel.has(arr[i + 1].id)) {
+          [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]];
+        }
+      }
+      return { objects: arr };
+    });
+  },
+  sendBackward: (ids) => {
+    if (ids.length === 0) return;
+    get().pushHistory();
+    set((s) => {
+      const arr = s.objects.slice();
+      const sel = new Set(ids);
+      for (let i = 1; i < arr.length; i++) {
+        if (sel.has(arr[i].id) && !sel.has(arr[i - 1].id)) {
+          [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]];
+        }
+      }
+      return { objects: arr };
+    });
+  },
+  bringToFront: (ids) => {
+    if (ids.length === 0) return;
+    get().pushHistory();
+    set((s) => {
+      const sel = new Set(ids);
+      const stay = s.objects.filter((o) => !sel.has(o.id));
+      const moved = s.objects.filter((o) => sel.has(o.id));
+      return { objects: [...stay, ...moved] };
+    });
+  },
+  sendToBack: (ids) => {
+    if (ids.length === 0) return;
+    get().pushHistory();
+    set((s) => {
+      const sel = new Set(ids);
+      const stay = s.objects.filter((o) => !sel.has(o.id));
+      const moved = s.objects.filter((o) => sel.has(o.id));
+      return { objects: [...moved, ...stay] };
+    });
+  },
+
+  groupSelection: (ids) => {
+    if (ids.length < 2) return;
+    get().pushHistory();
+    const gid = uid("grp");
+    set((s) => {
+      const sel = new Set(ids);
+      return {
+        objects: s.objects.map((o) =>
+          sel.has(o.id) ? ({ ...o, groupId: gid } as DiagramObject) : o
+        ),
+      };
+    });
+  },
+  ungroupSelection: (ids) => {
+    const objs = get().objects;
+    const sel = new Set(ids);
+    const groupsTouched = new Set<string>();
+    for (const o of objs) if (sel.has(o.id) && o.groupId) groupsTouched.add(o.groupId);
+    if (groupsTouched.size === 0) return;
+    get().pushHistory();
+    set((s) => ({
+      objects: s.objects.map((o) => {
+        if (o.groupId && groupsTouched.has(o.groupId)) {
+          const next = { ...o } as DiagramObject;
+          delete (next as any).groupId;
+          return next;
+        }
+        return o;
+      }),
+    }));
+  },
+
+  copy: (ids) => {
+    const sel = new Set(ids);
+    const objs = get().objects.filter((o) => sel.has(o.id));
+    set({ clipboard: objs.map((o) => structuredClone(o)) });
+  },
+  cut: (ids) => {
+    if (ids.length === 0) return;
+    get().copy(ids);
+    get().removeMany(ids);
+  },
+  paste: (offsetX = 24, offsetY = 24) => {
+    const cb = get().clipboard;
+    if (cb.length === 0) return [];
+    get().pushHistory();
+    // Re-id everything; preserve group structure by remapping group ids consistently.
+    const groupMap = new Map<string, string>();
+    const newIds: string[] = [];
+    const cloned = cb.map((o) => {
+      const next = structuredClone(o);
+      if (next.groupId) {
+        if (!groupMap.has(next.groupId)) groupMap.set(next.groupId, uid("grp"));
+        next.groupId = groupMap.get(next.groupId)!;
+      }
+      next.id = uid(prefixFor(next.kind));
+      if (next.kind === "line") {
+        next.points = next.points.map((p) => ({ x: p.x + offsetX, y: p.y + offsetY }));
+        // Drop endpoint vertex links — those refer to old vertices.
+        delete next.startVertexId;
+        delete next.endVertexId;
+      } else {
+        next.x += offsetX;
+        next.y += offsetY;
+      }
+      newIds.push(next.id);
+      return next;
+    });
+    set((s) => ({ objects: [...s.objects, ...cloned], selectedIds: newIds }));
+    return newIds;
+  },
 
   addLabel: (latex, x, y) => {
     get().pushHistory();
@@ -239,16 +414,19 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
 
   addLine: (points, style = "solid") => {
     get().pushHistory();
+    const d = defaultsFor(style);
     const obj: LineObject = {
       id: uid("ln"),
       kind: "line",
       points,
       style,
       arrow: "none",
+      arrowDirection: "forward",
       color: "#111111",
       strokeWidth: 2,
-      amplitude: 8,
-      wavelength: 16,
+      amplitude: d.amplitude,
+      wavelength: d.wavelength,
+      doubleSpacing: d.doubleSpacing,
     };
     set((s) => ({ objects: [...s.objects, obj], selectedIds: [obj.id] }));
     return obj;
@@ -286,7 +464,7 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
 
   pushHistory: () => {
     const s = get();
-    const snap = snapshot({ objects: s.objects, strokes: s.strokes });
+    const snap = snapshot({ objects: s.objects });
     const past = [...s.past, snap];
     if (past.length > HISTORY_LIMIT) past.shift();
     set({ past, future: [] });
@@ -296,12 +474,11 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
     if (s.past.length === 0) return;
     const previous = s.past[s.past.length - 1];
     const newPast = s.past.slice(0, -1);
-    const current = snapshot({ objects: s.objects, strokes: s.strokes });
+    const current = snapshot({ objects: s.objects });
     set({
       past: newPast,
       future: [current, ...s.future],
       objects: previous.objects,
-      strokes: previous.strokes,
       selectedIds: [],
     });
   },
@@ -310,29 +487,46 @@ export const useStore = create<DiagramState & HistoryState & Actions>((set, get)
     if (s.future.length === 0) return;
     const next = s.future[0];
     const newFuture = s.future.slice(1);
-    const current = snapshot({ objects: s.objects, strokes: s.strokes });
+    const current = snapshot({ objects: s.objects });
     set({
       past: [...s.past, current],
       future: newFuture,
       objects: next.objects,
-      strokes: next.strokes,
       selectedIds: [],
     });
   },
-  canUndo: () => get().past.length > 0,
-  canRedo: () => get().future.length > 0,
 
   loadState: (s) =>
     set(() => ({
       ...initial,
       ...s,
       objects: s.objects ?? [],
-      strokes: s.strokes ?? [],
       selectedIds: [],
       settings: get().settings,
       past: [],
       future: [],
+      clipboard: get().clipboard,
     })),
 
-  reset: () => set({ ...initial, settings: get().settings, past: [], future: [] }),
+  reset: () =>
+    set({
+      ...initial,
+      settings: get().settings,
+      past: [],
+      future: [],
+      clipboard: get().clipboard,
+    }),
 }));
+
+function prefixFor(kind: DiagramObject["kind"]): string {
+  switch (kind) {
+    case "line":
+      return "ln";
+    case "shape":
+      return "shp";
+    case "vertex":
+      return "vtx";
+    case "label":
+      return "lbl";
+  }
+}
