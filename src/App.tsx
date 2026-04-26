@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DrawLayer } from "./components/DrawLayer";
 import { EditCanvas } from "./components/EditCanvas";
 import { LabelDialog } from "./components/LabelDialog";
 import { PropertyPanel } from "./components/PropertyPanel";
@@ -8,7 +7,6 @@ import { useStore } from "./store";
 import { lastProject } from "./lib/storage";
 
 export default function App() {
-  const mode = useStore((s) => s.mode);
   const addLabel = useStore((s) => s.addLabel);
   const loadState = useStore((s) => s.loadState);
   const removeMany = useStore((s) => s.removeMany);
@@ -23,8 +21,8 @@ export default function App() {
 
   useEffect(() => {
     const last = lastProject();
-    if (last && (last.objects.length > 0 || last.strokes.length > 0)) {
-      loadState({ objects: last.objects, strokes: last.strokes, mode: "edit" });
+    if (last && Array.isArray(last.objects) && last.objects.length > 0) {
+      loadState({ objects: last.objects });
       setProjectName(last.name);
     }
   }, [loadState]);
@@ -42,8 +40,8 @@ export default function App() {
     return () => ro.disconnect();
   }, []);
 
-  // Backspace / Delete deletes the selected objects, with optional confirmation.
-  // Cmd/Ctrl-Z = undo, Shift+Cmd/Ctrl-Z (or Cmd/Ctrl-Y) = redo.
+  // Global keyboard shortcuts: undo/redo, delete, copy/cut/paste, group/ungroup,
+  // and layer ordering. Anything typed inside an input/textarea is left alone.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -55,6 +53,8 @@ export default function App() {
           (target as HTMLElement).isContentEditable);
 
       const meta = e.metaKey || e.ctrlKey;
+
+      // Undo / Redo
       if (meta && (e.key === "z" || e.key === "Z")) {
         if (isTextInput) return;
         e.preventDefault();
@@ -69,6 +69,75 @@ export default function App() {
         return;
       }
 
+      // Copy / Cut / Paste
+      if (meta && (e.key === "c" || e.key === "C")) {
+        if (isTextInput) return;
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        useStore.getState().copy(selectedIds);
+        return;
+      }
+      if (meta && (e.key === "x" || e.key === "X")) {
+        if (isTextInput) return;
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        useStore.getState().cut(selectedIds);
+        return;
+      }
+      if (meta && (e.key === "v" || e.key === "V")) {
+        if (isTextInput) return;
+        e.preventDefault();
+        useStore.getState().paste();
+        return;
+      }
+
+      // Duplicate (Cmd/Ctrl-D)
+      if (meta && (e.key === "d" || e.key === "D")) {
+        if (isTextInput) return;
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        useStore.getState().copy(selectedIds);
+        useStore.getState().paste();
+        return;
+      }
+
+      // Group / Ungroup
+      if (meta && (e.key === "g" || e.key === "G")) {
+        if (isTextInput) return;
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        if (e.shiftKey) useStore.getState().ungroupSelection(selectedIds);
+        else useStore.getState().groupSelection(selectedIds);
+        return;
+      }
+
+      // Layer ordering (Cmd/Ctrl-]/[)
+      if (meta && e.key === "]") {
+        if (isTextInput) return;
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        if (e.shiftKey) useStore.getState().bringToFront(selectedIds);
+        else useStore.getState().bringForward(selectedIds);
+        return;
+      }
+      if (meta && e.key === "[") {
+        if (isTextInput) return;
+        if (selectedIds.length === 0) return;
+        e.preventDefault();
+        if (e.shiftKey) useStore.getState().sendToBack(selectedIds);
+        else useStore.getState().sendBackward(selectedIds);
+        return;
+      }
+
+      // Select all
+      if (meta && (e.key === "a" || e.key === "A")) {
+        if (isTextInput) return;
+        e.preventDefault();
+        useStore.getState().setSelection(useStore.getState().objects.map((o) => o.id));
+        return;
+      }
+
+      // Delete
       if (e.key !== "Backspace" && e.key !== "Delete") return;
       if (isTextInput) return;
       if (selectedIds.length === 0) return;
@@ -104,15 +173,10 @@ export default function App() {
       />
       <div className="workspace">
         <div className="canvas-wrap" ref={surfaceRef}>
-          {mode === "draw" ? (
-            <DrawLayer width={size.w} height={size.h} />
-          ) : (
-            <EditCanvas ref={svgRef} width={size.w} height={size.h} />
-          )}
+          <EditCanvas ref={svgRef} width={size.w} height={size.h} />
           <div className="mode-hint">
-            {mode === "draw"
-              ? "Drawing mode — already-converted objects stay visible. Sketch more, then press Convert → editable."
-              : "Editing mode — click to select, drag from empty space to box-select, double-click a selected line to add anchors."}
+            Click an object to select. Drag to move. Hold Shift to multi-select. Double-click a
+            selected line to add an anchor; Alt-click an anchor to remove it.
           </div>
         </div>
         <aside className="sidebar">

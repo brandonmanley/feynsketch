@@ -77,6 +77,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
   const setPendingShape = useStore((s) => s.setPendingShape);
   const settings = useStore((s) => s.settings);
   const pushHistory = useStore((s) => s.pushHistory);
+  const removeAnchor = useStore((s) => s.removeAnchor);
 
   const [drag, setDrag] = useState<Drag>(null);
   const tempPath = useRef<SVGPathElement>(null);
@@ -348,6 +349,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
               selected={selected}
               onPointerDown={onDown}
               onAnchorPointerDown={(i, e) => startAnchorDrag(obj.id, i, e)}
+              onAnchorAltClick={(i) => removeAnchor(obj.id, i)}
             />
           );
         if (obj.kind === "shape")

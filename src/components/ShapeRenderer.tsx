@@ -43,6 +43,30 @@ export function ShapeRenderer({
             {...common}
           />
         );
+      case "cross":
+        // An "x" — two diagonal strokes. Fill is intentionally ignored.
+        return (
+          <g>
+            <line
+              x1={-w / 2}
+              y1={-h / 2}
+              x2={w / 2}
+              y2={h / 2}
+              stroke={shape.stroke}
+              strokeWidth={Math.max(2, shape.strokeWidth)}
+              strokeLinecap="round"
+            />
+            <line
+              x1={-w / 2}
+              y1={h / 2}
+              x2={w / 2}
+              y2={-h / 2}
+              stroke={shape.stroke}
+              strokeWidth={Math.max(2, shape.strokeWidth)}
+              strokeLinecap="round"
+            />
+          </g>
+        );
     }
   };
 

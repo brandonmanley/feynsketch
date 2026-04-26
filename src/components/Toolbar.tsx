@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
-import { classifyStroke, detectDashGroups, snapEndpointsTogether } from "../lib/strokeAnalysis";
-import type { DiagramObject, ShapeKind, ShapeObject, LineObject } from "../types";
-import { uid } from "../store";
+import type { ShapeKind } from "../types";
 import { performExport } from "../lib/exporters";
 import { ExportDialog } from "./ExportDialog";
 import {
@@ -25,11 +23,6 @@ export function Toolbar({
   projectName: string;
   setProjectName: (n: string) => void;
 }) {
-  const mode = useStore((s) => s.mode);
-  const setMode = useStore((s) => s.setMode);
-  const strokes = useStore((s) => s.strokes);
-  const clearStrokes = useStore((s) => s.clearStrokes);
-  const setObjects = useStore((s) => s.setObjects);
   const objects = useStore((s) => s.objects);
   const tool = useStore((s) => s.tool);
   const setTool = useStore((s) => s.setTool);
@@ -42,14 +35,22 @@ export function Toolbar({
   const redo = useStore((s) => s.redo);
   const past = useStore((s) => s.past);
   const future = useStore((s) => s.future);
+  const selectedIds = useStore((s) => s.selectedIds);
+  const copy = useStore((s) => s.copy);
+  const cut = useStore((s) => s.cut);
+  const paste = useStore((s) => s.paste);
+  const groupSelection = useStore((s) => s.groupSelection);
+  const ungroupSelection = useStore((s) => s.ungroupSelection);
+  const bringForward = useStore((s) => s.bringForward);
+  const sendBackward = useStore((s) => s.sendBackward);
+  const bringToFront = useStore((s) => s.bringToFront);
+  const sendToBack = useStore((s) => s.sendToBack);
+  const removeMany = useStore((s) => s.removeMany);
 
-  const [openMenu, setOpenMenu] = useState<null | "file" | "edit" | "insert" | "settings" | "shapes">(null);
+  const [openMenu, setOpenMenu] = useState<null | "file" | "edit" | "insert" | "shapes">(null);
   const [showExport, setShowExport] = useState(false);
   const menuBarRef = useRef<HTMLDivElement>(null);
 
-  // Close any open dropdown on outside click or Escape. Any element marked
-  // [data-menu-region] (the trigger, the dropdown panel, or its contents) is
-  // considered "inside" so clicks on items can still fire their handlers.
   useEffect(() => {
     if (!openMenu) return;
     const close = (e: MouseEvent) => {
@@ -68,87 +69,12 @@ export function Toolbar({
     };
   }, [openMenu]);
 
-  const convert = () => {
-    if (strokes.length === 0) {
-      setMode("edit");
-      return;
-    }
-
-    const dashGroups = detectDashGroups(strokes);
-    const consumed = new Set<number>();
-    const dashLines: LineObject[] = [];
-    for (const g of dashGroups) {
-      for (const i of g.strokeIndices) consumed.add(i);
-      dashLines.push({
-        id: uid("ln"),
-        kind: "line",
-        points: [g.start, g.end],
-        style: "dashed",
-        arrow: "none",
-        color: "#111111",
-        strokeWidth: 2,
-        amplitude: 8,
-        wavelength: 16,
-      });
-    }
-
-    const newLines: LineObject[] = [];
-    const newShapes: ShapeObject[] = [];
-    for (let i = 0; i < strokes.length; i++) {
-      if (consumed.has(i)) continue;
-      const c = classifyStroke(strokes[i]);
-      if (c.kind === "shape") {
-        newShapes.push({
-          id: uid("shp"),
-          kind: "shape",
-          shape: c.shape,
-          x: c.cx,
-          y: c.cy,
-          width: c.width,
-          height: c.height,
-          rotation: c.rotation,
-          fill: "transparent",
-          stroke: "#111111",
-          strokeWidth: 2,
-        });
-      } else {
-        newLines.push({
-          id: uid("ln"),
-          kind: "line",
-          points: c.controlPoints,
-          style: c.style,
-          arrow: "none",
-          color: "#111111",
-          strokeWidth: 2,
-          amplitude: c.amplitude,
-          wavelength: c.wavelength,
-        });
-      }
-    }
-
-    const allLines = [...dashLines, ...newLines];
-    const snapped = snapEndpointsTogether(
-      allLines.map((l) => ({ id: l.id, points: l.points })),
-      18
-    );
-    const snapMap = new Map(snapped.map((s) => [s.id, s.points]));
-    const finalLines: LineObject[] = allLines.map((l) => ({
-      ...l,
-      points: snapMap.get(l.id) ?? l.points,
-    }));
-
-    const newObjects: DiagramObject[] = [...objects, ...newShapes, ...finalLines];
-    setObjects(newObjects);
-    clearStrokes();
-    setMode("edit");
-  };
-
-  const handleSave = () => saveProject(projectName || "Untitled", { objects, strokes });
+  const handleSave = () => saveProject(projectName || "Untitled", { objects });
 
   const handleLoad = (name: string) => {
     const p = loadProject(name);
     if (p) {
-      loadState({ objects: p.objects, strokes: p.strokes, mode: "edit" });
+      loadState({ objects: p.objects });
       setProjectName(p.name);
     }
     setOpenMenu(null);
@@ -159,7 +85,7 @@ export function Toolbar({
     if (!file) return;
     try {
       const p = await importProjectFile(file);
-      loadState({ objects: p.objects, strokes: p.strokes, mode: "edit" });
+      loadState({ objects: p.objects });
       setProjectName(p.name);
     } catch (e) {
       alert("Could not import file: " + String(e));
@@ -171,10 +97,13 @@ export function Toolbar({
   const saved = listProjects();
   const canUndo = past.length > 0;
   const canRedo = future.length > 0;
+  const hasSelection = selectedIds.length > 0;
 
   const setOrToggle = (id: typeof openMenu) => {
     setOpenMenu((prev) => (prev === id ? null : id));
   };
+
+  const close = () => setOpenMenu(null);
 
   return (
     <>
@@ -185,27 +114,23 @@ export function Toolbar({
         </div>
 
         <div className="menubar-menus">
-          <Menu
-            label="File"
-            open={openMenu === "file"}
-            onToggle={() => setOrToggle("file")}
-          >
+          <Menu label="File" open={openMenu === "file"} onToggle={() => setOrToggle("file")}>
             <MenuItem
               onClick={() => {
-                if (objects.length > 0 || strokes.length > 0) {
+                if (objects.length > 0) {
                   if (!window.confirm("Discard the current diagram and start a new one?")) return;
                 }
                 reset();
                 setProjectName("Untitled");
-                setOpenMenu(null);
+                close();
               }}
             >
-              New <Kbd>blank</Kbd>
+              New
             </MenuItem>
             <MenuItem
               onClick={() => {
                 handleSave();
-                setOpenMenu(null);
+                close();
               }}
             >
               Save project
@@ -213,7 +138,7 @@ export function Toolbar({
             <MenuItem
               onClick={() => {
                 setShowExport(true);
-                setOpenMenu(null);
+                close();
               }}
             >
               Export…
@@ -231,7 +156,7 @@ export function Toolbar({
                   className="dropdown-item mini danger"
                   onClick={() => {
                     deleteProject(p.name);
-                    setOpenMenu(null);
+                    close();
                   }}
                   title="Delete this saved project"
                 >
@@ -246,28 +171,91 @@ export function Toolbar({
             </label>
           </Menu>
 
-          <Menu
-            label="Edit"
-            open={openMenu === "edit"}
-            onToggle={() => setOrToggle("edit")}
-          >
-            <MenuItem
-              disabled={!canUndo}
-              onClick={() => {
-                undo();
-                setOpenMenu(null);
-              }}
-            >
+          <Menu label="Edit" open={openMenu === "edit"} onToggle={() => setOrToggle("edit")}>
+            <MenuItem disabled={!canUndo} onClick={() => { undo(); close(); }}>
               Undo <Kbd>⌘Z</Kbd>
             </MenuItem>
+            <MenuItem disabled={!canRedo} onClick={() => { redo(); close(); }}>
+              Redo <Kbd>⇧⌘Z</Kbd>
+            </MenuItem>
+            <MenuDivider />
             <MenuItem
-              disabled={!canRedo}
+              disabled={!hasSelection}
+              onClick={() => { cut(selectedIds); close(); }}
+            >
+              Cut <Kbd>⌘X</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { copy(selectedIds); close(); }}
+            >
+              Copy <Kbd>⌘C</Kbd>
+            </MenuItem>
+            <MenuItem onClick={() => { paste(); close(); }}>
+              Paste <Kbd>⌘V</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { copy(selectedIds); paste(); close(); }}
+            >
+              Duplicate <Kbd>⌘D</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
               onClick={() => {
-                redo();
-                setOpenMenu(null);
+                if (settings.confirmDelete &&
+                  !window.confirm(
+                    selectedIds.length === 1
+                      ? "Delete this object?"
+                      : `Delete ${selectedIds.length} objects?`
+                  )
+                ) {
+                  close();
+                  return;
+                }
+                removeMany(selectedIds);
+                close();
               }}
             >
-              Redo <Kbd>⇧⌘Z</Kbd>
+              Delete <Kbd>Del</Kbd>
+            </MenuItem>
+            <MenuDivider />
+            <MenuItem
+              disabled={selectedIds.length < 2}
+              onClick={() => { groupSelection(selectedIds); close(); }}
+            >
+              Group <Kbd>⌘G</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { ungroupSelection(selectedIds); close(); }}
+            >
+              Ungroup <Kbd>⇧⌘G</Kbd>
+            </MenuItem>
+            <MenuDivider />
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { bringForward(selectedIds); close(); }}
+            >
+              Bring forward <Kbd>⌘]</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { sendBackward(selectedIds); close(); }}
+            >
+              Send backward <Kbd>⌘[</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { bringToFront(selectedIds); close(); }}
+            >
+              Bring to front <Kbd>⇧⌘]</Kbd>
+            </MenuItem>
+            <MenuItem
+              disabled={!hasSelection}
+              onClick={() => { sendToBack(selectedIds); close(); }}
+            >
+              Send to back <Kbd>⇧⌘[</Kbd>
             </MenuItem>
             <MenuDivider />
             <label className="dropdown-item check-item">
@@ -300,55 +288,28 @@ export function Toolbar({
             </div>
           </Menu>
 
-          {mode === "edit" && (
-            <Menu
-              label="Insert"
-              open={openMenu === "insert"}
-              onToggle={() => setOrToggle("insert")}
-            >
-              <MenuItem
-                onClick={() => {
-                  setTool("line");
-                  setOpenMenu(null);
-                }}
-              >
-                Line
-              </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setTool("vertex");
-                  setOpenMenu(null);
-                }}
-              >
-                Vertex
-              </MenuItem>
-              <MenuLabel>Shapes</MenuLabel>
-              <div className="shape-grid">
-                {(["circle", "ellipse", "square", "rect", "triangle", "diamond"] as ShapeKind[]).map((s) => (
-                  <button
-                    key={s}
-                    className="chip"
-                    onClick={() => {
-                      setPendingShape(s);
-                      setTool("shape");
-                      setOpenMenu(null);
-                    }}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-              <MenuDivider />
-              <MenuItem
-                onClick={() => {
-                  onShowLabel();
-                  setOpenMenu(null);
-                }}
-              >
-                LaTeX label
-              </MenuItem>
-            </Menu>
-          )}
+          <Menu label="Insert" open={openMenu === "insert"} onToggle={() => setOrToggle("insert")}>
+            <MenuItem onClick={() => { setTool("line"); close(); }}>Line</MenuItem>
+            <MenuItem onClick={() => { setTool("vertex"); close(); }}>Vertex</MenuItem>
+            <MenuLabel>Shapes</MenuLabel>
+            <div className="shape-grid">
+              {(["circle", "ellipse", "square", "rect", "triangle", "diamond", "cross"] as ShapeKind[]).map((s) => (
+                <button
+                  key={s}
+                  className="chip"
+                  onClick={() => {
+                    setPendingShape(s);
+                    setTool("shape");
+                    close();
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+            <MenuDivider />
+            <MenuItem onClick={() => { onShowLabel(); close(); }}>LaTeX label</MenuItem>
+          </Menu>
         </div>
 
         <input
@@ -398,86 +359,55 @@ export function Toolbar({
       </div>
 
       <div className="toolstrip">
-        <div className="seg">
+        <button
+          className={`btn ${tool === "select" ? "active" : ""}`}
+          onClick={() => setTool("select")}
+        >
+          Select
+        </button>
+        <button
+          className={`btn ${tool === "line" ? "active" : ""}`}
+          onClick={() => setTool(tool === "line" ? "select" : "line")}
+        >
+          Line
+        </button>
+        <button
+          className={`btn ${tool === "vertex" ? "active" : ""}`}
+          onClick={() => setTool(tool === "vertex" ? "select" : "vertex")}
+        >
+          Vertex
+        </button>
+        <div className="dropdown" data-menu-region>
           <button
-            className={`seg-btn ${mode === "draw" ? "active" : ""}`}
-            onClick={() => setMode("draw")}
+            className={`btn ${tool === "shape" ? "active" : ""}`}
+            onClick={() => setOrToggle("shapes")}
           >
-            Draw
+            Shape ▾
           </button>
-          <button
-            className={`seg-btn ${mode === "edit" ? "active" : ""}`}
-            onClick={() => setMode("edit")}
-          >
-            Edit
-          </button>
-        </div>
-
-        {mode === "draw" && (
-          <>
-            <button className="btn primary" onClick={convert}>
-              Convert → editable
-            </button>
-            <button className="btn" onClick={clearStrokes}>
-              Clear strokes
-            </button>
-            <span className="hint">
-              Sketch your diagram freely — straight bits become straight, photons become wiggly,
-              gluons become curly, and runs of dashes are detected automatically.
-            </span>
-          </>
-        )}
-
-        {mode === "edit" && (
-          <>
-            <button
-              className={`btn ${tool === "select" ? "active" : ""}`}
-              onClick={() => setTool("select")}
-            >
-              Select
-            </button>
-            <button
-              className={`btn ${tool === "line" ? "active" : ""}`}
-              onClick={() => setTool(tool === "line" ? "select" : "line")}
-            >
-              Line
-            </button>
-            <button
-              className={`btn ${tool === "vertex" ? "active" : ""}`}
-              onClick={() => setTool(tool === "vertex" ? "select" : "vertex")}
-            >
-              Vertex
-            </button>
-            <div className="dropdown" data-menu-region>
-              <button
-                className={`btn ${tool === "shape" ? "active" : ""}`}
-                onClick={() => setOrToggle("shapes")}
-              >
-                Shape ▾
-              </button>
-              {openMenu === "shapes" && (
-                <div className="dropdown-menu" data-menu-region>
-                  {(["circle", "ellipse", "square", "rect", "triangle", "diamond"] as ShapeKind[]).map((s) => (
-                    <button
-                      key={s}
-                      className="dropdown-item"
-                      onClick={() => {
-                        setPendingShape(s);
-                        setTool("shape");
-                        setOpenMenu(null);
-                      }}
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              )}
+          {openMenu === "shapes" && (
+            <div className="dropdown-menu" data-menu-region>
+              {(["circle", "ellipse", "square", "rect", "triangle", "diamond", "cross"] as ShapeKind[]).map((s) => (
+                <button
+                  key={s}
+                  className="dropdown-item"
+                  onClick={() => {
+                    setPendingShape(s);
+                    setTool("shape");
+                    close();
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
             </div>
-            <button className="btn" onClick={onShowLabel}>
-              LaTeX label
-            </button>
-          </>
-        )}
+          )}
+        </div>
+        <button className="btn" onClick={onShowLabel}>
+          LaTeX label
+        </button>
+        <span className="hint">
+          Drag with the marquee to box-select. Cmd/Ctrl-G groups; Cmd/Ctrl-]/[ change layer order.
+        </span>
       </div>
 
       <ExportDialog
@@ -487,7 +417,7 @@ export function Toolbar({
         onSubmit={async (v) => {
           try {
             if (v.format === "json") {
-              exportProjectFile(v.filename, { objects, strokes });
+              exportProjectFile(v.filename, { objects });
             } else {
               await performExport(getSvg(), {
                 filename: v.filename,

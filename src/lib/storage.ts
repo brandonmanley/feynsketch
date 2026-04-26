@@ -1,4 +1,4 @@
-import type { DiagramObject, Stroke } from "../types";
+import type { DiagramObject } from "../types";
 
 const KEY = "feynsketch:save";
 const LIST_KEY = "feynsketch:saves";
@@ -7,11 +7,13 @@ export interface SavedProject {
   name: string;
   savedAt: number;
   objects: DiagramObject[];
-  strokes: Stroke[];
+  /** Older project files may include a `strokes` array — kept optional for
+   *  backwards compatibility. The app no longer reads or writes strokes. */
+  strokes?: unknown[];
 }
 
-export function saveProject(name: string, data: { objects: DiagramObject[]; strokes: Stroke[] }) {
-  const payload: SavedProject = { name, savedAt: Date.now(), ...data };
+export function saveProject(name: string, data: { objects: DiagramObject[] }) {
+  const payload: SavedProject = { name, savedAt: Date.now(), objects: data.objects };
   try {
     const all = listProjects();
     const existing = all.findIndex((p) => p.name === name);
@@ -54,8 +56,8 @@ export function lastProject(): SavedProject | null {
   }
 }
 
-export function exportProjectFile(name: string, data: { objects: DiagramObject[]; strokes: Stroke[] }) {
-  const payload: SavedProject = { name, savedAt: Date.now(), ...data };
+export function exportProjectFile(name: string, data: { objects: DiagramObject[] }) {
+  const payload: SavedProject = { name, savedAt: Date.now(), objects: data.objects };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   download(blob, `${sanitize(name)}.feyn.json`);
 }
