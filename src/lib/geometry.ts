@@ -26,10 +26,11 @@ export function totalLength(points: Point[]): number {
 }
 
 /* ----------------------------------------------------------- *
- * Centripetal Catmull-Rom -> cubic Bezier conversion.         *
- * Produces a smooth curve passing through every input point   *
- * with no overshoot or self-loops, even when control points   *
- * are unevenly spaced or nearly collinear.                    *
+ * Circular-arc spline -> cubic Bezier conversion.             *
+ * Tangent at each anchor is the tangent of the circle through *
+ * that point and its two neighbors, so three points on a      *
+ * circle reproduce the corresponding arc exactly (e.g. three  *
+ * points on a unit circle yield a true half-circle).          *
  * ----------------------------------------------------------- */
 export interface Bezier {
   p0: Point;
@@ -38,60 +39,95 @@ export interface Bezier {
   p1: Point;
 }
 
-export function catmullRomBeziers(points: Point[], alpha = 0.5): Bezier[] {
+/** Tangent at `p` on the circle through (prev, p, next), oriented along `dirHint`.
+ *  Returns null if the three points are collinear (caller should fall back). */
+function circleTangent(prev: Point, p: Point, next: Point, dirHint: Point): Point | null {
+  const ax = prev.x, ay = prev.y;
+  const bx = p.x, by = p.y;
+  const cx = next.x, cy = next.y;
+  const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (Math.abs(D) < 1e-9) return null;
+  const a2 = ax * ax + ay * ay;
+  const b2 = bx * bx + by * by;
+  const c2 = cx * cx + cy * cy;
+  const ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / D;
+  const uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / D;
+  // Tangent is perpendicular to the radius (p - center).
+  let tx = -(p.y - uy);
+  let ty = p.x - ux;
+  const len = Math.hypot(tx, ty);
+  if (len < 1e-9) return null;
+  tx /= len; ty /= len;
+  if (tx * dirHint.x + ty * dirHint.y < 0) {
+    tx = -tx; ty = -ty;
+  }
+  return { x: tx, y: ty };
+}
+
+function anchorTangents(points: Point[]): Point[] {
+  const n = points.length;
+  const tans: Point[] = new Array(n);
+  if (n < 2) return tans;
+  if (n === 2) {
+    const dir = normalize(sub(points[1], points[0]));
+    tans[0] = dir;
+    tans[1] = dir;
+    return tans;
+  }
+  // Endpoints: tangent at the boundary point of the circle through the first/last
+  // three anchors. circleTangent evaluates the tangent at its second argument.
+  const startHint = sub(points[1], points[0]);
+  tans[0] = circleTangent(points[1], points[0], points[2], startHint)
+    ?? normalize(startHint);
+
+  const endHint = sub(points[n - 1], points[n - 2]);
+  tans[n - 1] = circleTangent(points[n - 2], points[n - 1], points[n - 3], endHint)
+    ?? normalize(endHint);
+
+  for (let i = 1; i < n - 1; i++) {
+    const hint = sub(points[i + 1], points[i - 1]);
+    const t = circleTangent(points[i - 1], points[i], points[i + 1], hint);
+    tans[i] = t ?? normalize(hint);
+  }
+  return tans;
+}
+
+/** Cubic-Bezier control point distance that approximates a circular arc whose
+ *  endpoint tangent makes the given chord angle. Reduces to L/3 for straight
+ *  segments and to ~0.5523*R for a quarter circle. */
+function arcControlDistance(L: number, tDotChord: number): number {
+  if (L < 1e-9) return 0;
+  const denom = Math.max(L * 0.1, L + tDotChord);
+  return (2 / 3) * (L * L) / denom;
+}
+
+export function catmullRomBeziers(points: Point[]): Bezier[] {
   const n = points.length;
   if (n < 2) return [];
-  // Build phantom endpoints by reflecting the second/penultimate points to keep
-  // the curve well-defined at the boundaries.
-  const phantomStart: Point = {
-    x: 2 * points[0].x - points[1].x,
-    y: 2 * points[0].y - points[1].y,
-  };
-  const phantomEnd: Point = {
-    x: 2 * points[n - 1].x - points[n - 2].x,
-    y: 2 * points[n - 1].y - points[n - 2].y,
-  };
-  const all: Point[] = [phantomStart, ...points, phantomEnd];
-
+  if (n === 2) {
+    const a = points[0];
+    const b = points[1];
+    const c1 = { x: a.x + (b.x - a.x) / 3, y: a.y + (b.y - a.y) / 3 };
+    const c2 = { x: a.x + (2 * (b.x - a.x)) / 3, y: a.y + (2 * (b.y - a.y)) / 3 };
+    return [{ p0: a, c1, c2, p1: b }];
+  }
+  const tans = anchorTangents(points);
   const segs: Bezier[] = [];
-  for (let i = 1; i < all.length - 2; i++) {
-    const p0 = all[i - 1];
-    const p1 = all[i];
-    const p2 = all[i + 1];
-    const p3 = all[i + 2];
-
-    const d01 = Math.pow(dist(p0, p1), alpha);
-    const d12 = Math.pow(dist(p1, p2), alpha);
-    const d23 = Math.pow(dist(p2, p3), alpha);
-
-    let c1x = p1.x;
-    let c1y = p1.y;
-    let c2x = p2.x;
-    let c2y = p2.y;
-
-    if (d12 > 1e-9) {
-      // Tangent at p1
-      if (d01 > 1e-9) {
-        const t1x = (p1.x - p0.x) / d01 - (p2.x - p0.x) / (d01 + d12) + (p2.x - p1.x) / d12;
-        const t1y = (p1.y - p0.y) / d01 - (p2.y - p0.y) / (d01 + d12) + (p2.y - p1.y) / d12;
-        c1x = p1.x + (t1x * d12) / 3;
-        c1y = p1.y + (t1y * d12) / 3;
-      } else {
-        c1x = p1.x + (p2.x - p1.x) / 3;
-        c1y = p1.y + (p2.y - p1.y) / 3;
-      }
-      // Tangent at p2
-      if (d23 > 1e-9) {
-        const t2x = (p2.x - p1.x) / d12 - (p3.x - p1.x) / (d12 + d23) + (p3.x - p2.x) / d23;
-        const t2y = (p2.y - p1.y) / d12 - (p3.y - p1.y) / (d12 + d23) + (p3.y - p2.y) / d23;
-        c2x = p2.x - (t2x * d12) / 3;
-        c2y = p2.y - (t2y * d12) / 3;
-      } else {
-        c2x = p2.x - (p2.x - p1.x) / 3;
-        c2y = p2.y - (p2.y - p1.y) / 3;
-      }
-    }
-    segs.push({ p0: p1, c1: { x: c1x, y: c1y }, c2: { x: c2x, y: c2y }, p1: p2 });
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = points[i];
+    const p1 = points[i + 1];
+    const chord: Point = { x: p1.x - p0.x, y: p1.y - p0.y };
+    const L = Math.hypot(chord.x, chord.y);
+    const t0 = tans[i];
+    const t1 = tans[i + 1];
+    const d0 = arcControlDistance(L, t0.x * chord.x + t0.y * chord.y);
+    const d1 = arcControlDistance(L, t1.x * chord.x + t1.y * chord.y);
+    segs.push({
+      p0,
+      c1: { x: p0.x + d0 * t0.x, y: p0.y + d0 * t0.y },
+      c2: { x: p1.x - d1 * t1.x, y: p1.y - d1 * t1.y },
+      p1,
+    });
   }
   return segs;
 }

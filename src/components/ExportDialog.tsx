@@ -48,7 +48,8 @@ export function ExportDialog({
 
   if (!open) return null;
 
-  const isRaster = format === "png" || format === "pdf";
+  // PDF is exported as vector (no rasterization), so DPI doesn't apply.
+  const showDpi = format === "png";
   const supportsTransparent = format === "png" || format === "svg";
 
   return (
@@ -84,7 +85,7 @@ export function ExportDialog({
           </div>
         </div>
 
-        {isRaster && (
+        {showDpi && (
           <div className="form-row">
             <label className="form-label">Quality</label>
             <div className="grid five">
