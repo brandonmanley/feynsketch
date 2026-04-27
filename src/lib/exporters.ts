@@ -1,5 +1,6 @@
 import { jsPDF } from "jspdf";
 import { svg2pdf } from "svg2pdf.js";
+import opentype, { Font } from "opentype.js";
 import { download } from "./storage";
 
 export type ExportFormat = "svg" | "png" | "pdf" | "json";
@@ -18,11 +19,10 @@ export interface ExportOptions {
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /**
- * Build an export-ready clone of the live SVG. Replaces every <foreignObject>
- * (KaTeX labels) with a flattened group of native <text>/<line> elements driven
- * by the live DOM measurements, and embeds the KaTeX font binaries as base64
- * data URIs so the output renders identically to the editor without needing
- * network access or system font fallbacks.
+ * Build an export-ready clone of the live SVG. Each KaTeX <foreignObject> is
+ * replaced with a group of SVG <path> elements obtained by tracing each glyph
+ * through opentype.js, so the output renders identically everywhere without
+ * depending on font availability at render time.
  */
 export async function getSvgSource(svgEl: SVGSVGElement, transparent = false): Promise<string> {
   const liveForeignObjects = Array.from(svgEl.querySelectorAll("foreignObject"));
@@ -38,7 +38,6 @@ export async function getSvgSource(svgEl: SVGSVGElement, transparent = false): P
   if (!clone.hasAttribute("xmlns:xlink"))
     clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
-  // Background rect (matches the canvas background) unless caller wants transparency.
   if (!transparent) {
     const bg = document.createElementNS(SVG_NS, "rect");
     bg.setAttribute("x", "0");
@@ -49,69 +48,165 @@ export async function getSvgSource(svgEl: SVGSVGElement, transparent = false): P
     clone.insertBefore(bg, clone.firstChild);
   }
 
-  // Replace each foreignObject in the clone with a flattened SVG group built
-  // from the live DOM. Iteration order in the clone matches the live order.
+  // Strip the editor's view transform so the export reflects the diagram at
+  // its true coordinates regardless of current zoom/pan.
+  clone.querySelectorAll("[data-view-root]").forEach((el) => {
+    el.removeAttribute("transform");
+  });
+
+  // Replace each foreignObject with a vectorized group built from the live DOM.
   const cloneForeignObjects = Array.from(clone.querySelectorAll("foreignObject"));
   for (let i = 0; i < cloneForeignObjects.length; i++) {
     const liveFo = liveForeignObjects[i];
     const cloneFo = cloneForeignObjects[i];
     if (!liveFo || !cloneFo) continue;
-    const flat = flattenLatexForeignObject(liveFo);
+    const flat = await vectorizeLatexForeignObject(liveFo);
     if (flat && cloneFo.parentNode) {
       cloneFo.parentNode.replaceChild(flat, cloneFo);
     }
   }
 
-  const css = await getEmbeddedKatexCss();
-  if (css) {
-    const style = document.createElementNS(SVG_NS, "style");
-    style.textContent = css;
-    clone.insertBefore(style, clone.firstChild);
-  }
   return new XMLSerializer().serializeToString(clone);
 }
 
-/** Walk the rendered KaTeX HTML inside a live foreignObject and emit a
- *  positioned SVG <g> of <text> + <line> elements that mirrors the layout. */
-function flattenLatexForeignObject(liveFo: SVGForeignObjectElement): SVGGElement | null {
+/* ---- KaTeX text → SVG path vectorization ----------------------------- */
+
+interface KatexFontDescriptor {
+  family: string;
+  style: "normal" | "italic";
+  weight: number;
+  ttfUrl: string;
+}
+
+let katexFontDescriptorsCache: Promise<KatexFontDescriptor[]> | null = null;
+const fontFileCache = new Map<string, Promise<Font | null>>();
+
+function discoverKatexFontDescriptors(): Promise<KatexFontDescriptor[]> {
+  if (!katexFontDescriptorsCache) katexFontDescriptorsCache = doDiscoverKatexFonts();
+  return katexFontDescriptorsCache;
+}
+
+async function doDiscoverKatexFonts(): Promise<KatexFontDescriptor[]> {
+  const out: KatexFontDescriptor[] = [];
+  const sheets = Array.from(document.styleSheets);
+  for (const sheet of sheets) {
+    let rules: CSSRuleList | null = null;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    if (!rules) continue;
+    const sheetBase = sheet.href || document.baseURI;
+    for (const rule of Array.from(rules)) {
+      if (rule.type !== CSSRule.FONT_FACE_RULE) continue;
+      const r = rule as CSSFontFaceRule;
+      const txt = r.cssText;
+      if (!txt.includes("KaTeX")) continue;
+      const family = (r.style.getPropertyValue("font-family") || "").replace(/['"]/g, "").trim();
+      const cssStyle = (r.style.getPropertyValue("font-style") || "normal").trim();
+      const cssWeight = (r.style.getPropertyValue("font-weight") || "400").trim();
+      const isItalic = cssStyle === "italic" || cssStyle === "oblique";
+      const weight = parseInt(cssWeight, 10) || (cssWeight === "bold" ? 700 : 400);
+      const ttfMatch = /url\(\s*(['"]?)([^)'"]+\.ttf[^)'"]*)\1\s*\)\s*format\(\s*['"]?(?:truetype|ttf)['"]?\s*\)/i.exec(
+        txt
+      );
+      if (!ttfMatch) continue;
+      const abs = new URL(ttfMatch[2], sheetBase).href;
+      out.push({
+        family,
+        style: isItalic ? "italic" : "normal",
+        weight,
+        ttfUrl: abs,
+      });
+    }
+  }
+  return out;
+}
+
+async function loadFont(url: string): Promise<Font | null> {
+  let cached = fontFileCache.get(url);
+  if (cached) return cached;
+  cached = (async () => {
+    try {
+      const res = await fetch(url, { credentials: "omit", mode: "cors" });
+      if (!res.ok) return null;
+      const buf = await res.arrayBuffer();
+      return opentype.parse(buf);
+    } catch {
+      return null;
+    }
+  })();
+  fontFileCache.set(url, cached);
+  return cached;
+}
+
+async function resolveKatexFont(
+  familyList: string,
+  style: string,
+  weight: number
+): Promise<Font | null> {
+  const descriptors = await discoverKatexFontDescriptors();
+  const families = familyList.split(",").map((s) => s.trim().replace(/['"]/g, ""));
+  const wantItalic = style === "italic" || style === "oblique";
+  const wantBold = weight >= 600;
+
+  for (const fam of families) {
+    if (!fam.startsWith("KaTeX")) continue;
+    const candidates = descriptors.filter((d) => d.family === fam);
+    if (candidates.length === 0) continue;
+    const exact = candidates.find(
+      (d) => d.style === (wantItalic ? "italic" : "normal") && d.weight >= 600 === wantBold
+    );
+    const chosen = exact || candidates[0];
+    const f = await loadFont(chosen.ttfUrl);
+    if (f) return f;
+  }
+  return null;
+}
+
+async function vectorizeLatexForeignObject(
+  liveFo: SVGForeignObjectElement
+): Promise<SVGGElement | null> {
   try {
     const foRect = liveFo.getBoundingClientRect();
+    // The foreignObject sits inside the editor's view transform (zoom + pan).
+    // getBoundingClientRect reports screen pixels; divide by the CTM scale to
+    // recover foreignObject-local SVG units.
+    const ctm = liveFo.getScreenCTM();
+    const scale = ctm ? Math.hypot(ctm.a, ctm.b) || 1 : 1;
+    const localX = (sx: number) => (sx - foRect.left) / scale;
+    const localY = (sy: number) => (sy - foRect.top) / scale;
     const g = document.createElementNS(SVG_NS, "g");
 
-    // Preserve the foreignObject's own (x, y) offset so the flattened group
-    // ends up in the same spot inside its parent.
     const fox = parseFloat(liveFo.getAttribute("x") || "0") || 0;
     const foy = parseFloat(liveFo.getAttribute("y") || "0") || 0;
-    if (fox !== 0 || foy !== 0) {
-      g.setAttribute("transform", `translate(${fox},${foy})`);
-    }
+    if (fox !== 0 || foy !== 0) g.setAttribute("transform", `translate(${fox},${foy})`);
 
-    // Visible borders (e.g. KaTeX fraction bars, sqrt rules).
+    // Visible borders (KaTeX fraction bars, sqrt rules) — render as <line>.
     liveFo.querySelectorAll<HTMLElement>("*").forEach((el) => {
-      const cs = window.getComputedStyle(el);
-      // Skip the hidden MathML branch entirely.
       if (el.closest(".katex-mathml")) return;
+      const cs = window.getComputedStyle(el);
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) return;
-      const sides: Array<["Top" | "Bottom" | "Left" | "Right", number, number, number, number]> = [
-        ["Top", r.left, r.top, r.right, r.top],
-        ["Bottom", r.left, r.bottom, r.right, r.bottom],
-        ["Left", r.left, r.top, r.left, r.bottom],
-        ["Right", r.right, r.top, r.right, r.bottom],
+      const sides: Array<["top" | "bottom" | "left" | "right", number, number, number, number]> = [
+        ["top", r.left, r.top, r.right, r.top],
+        ["bottom", r.left, r.bottom, r.right, r.bottom],
+        ["left", r.left, r.top, r.left, r.bottom],
+        ["right", r.right, r.top, r.right, r.bottom],
       ];
       for (const [side, x1, y1, x2, y2] of sides) {
-        const w = parseFloat(cs.getPropertyValue(`border-${side.toLowerCase()}-width`)) || 0;
-        const style = cs.getPropertyValue(`border-${side.toLowerCase()}-style`);
-        if (w < 0.05 || style === "none" || style === "hidden") continue;
-        const color = cs.getPropertyValue(`border-${side.toLowerCase()}-color`) || "#000";
+        const w = parseFloat(cs.getPropertyValue(`border-${side}-width`)) || 0;
+        const sty = cs.getPropertyValue(`border-${side}-style`);
+        if (w < 0.05 || sty === "none" || sty === "hidden") continue;
+        const color = cs.getPropertyValue(`border-${side}-color`) || "#000";
+        const ox = side === "left" ? w / 2 : side === "right" ? -w / 2 : 0;
+        const oy = side === "top" ? w / 2 : side === "bottom" ? -w / 2 : 0;
         const line = document.createElementNS(SVG_NS, "line");
-        // Center the line on the border (browsers render the border centered on the box edge).
-        const ox = side === "Left" ? w / 2 : side === "Right" ? -w / 2 : 0;
-        const oy = side === "Top" ? w / 2 : side === "Bottom" ? -w / 2 : 0;
-        line.setAttribute("x1", String(x1 - foRect.left + ox));
-        line.setAttribute("y1", String(y1 - foRect.top + oy));
-        line.setAttribute("x2", String(x2 - foRect.left + ox));
-        line.setAttribute("y2", String(y2 - foRect.top + oy));
+        line.setAttribute("x1", String(localX(x1) + ox));
+        line.setAttribute("y1", String(localY(y1) + oy));
+        line.setAttribute("x2", String(localX(x2) + ox));
+        line.setAttribute("y2", String(localY(y2) + oy));
         line.setAttribute("stroke", color);
         line.setAttribute("stroke-width", String(w));
         line.setAttribute("stroke-linecap", "butt");
@@ -119,12 +214,10 @@ function flattenLatexForeignObject(liveFo: SVGForeignObjectElement): SVGGElement
       }
     });
 
-    // Visible text nodes (everything outside the hidden MathML branch).
+    // Walk visible text nodes; vectorize each via opentype.js.
     const walker = document.createTreeWalker(liveFo, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
-        if (!node.textContent || !node.textContent.replace(/\s+/g, "")) {
-          return NodeFilter.FILTER_REJECT;
-        }
+        if (!node.textContent || !node.textContent.replace(/\s+/g, "")) return NodeFilter.FILTER_REJECT;
         const parent = (node as Text).parentElement;
         if (parent && parent.closest(".katex-mathml")) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
@@ -142,21 +235,35 @@ function flattenLatexForeignObject(liveFo: SVGForeignObjectElement): SVGGElement
       if (r.width <= 0 && r.height <= 0) continue;
       const cs = window.getComputedStyle(parent);
       const fontSize = parseFloat(cs.fontSize) || 12;
-      // SVG <text> y is the alphabetic baseline; for HTML inline text the
-      // baseline sits at top + ~0.78 * font-size for typical math fonts.
-      const baselineY = r.top - foRect.top + fontSize * 0.78;
-      const textX = r.left - foRect.left;
+      const weight = parseInt(cs.fontWeight, 10) || (cs.fontWeight === "bold" ? 700 : 400);
+      const font = await resolveKatexFont(cs.fontFamily, cs.fontStyle, weight);
+      const fill = cs.color || "#000";
+      const xLeft = localX(r.left);
 
+      if (font) {
+        const ascender = font.ascender / font.unitsPerEm;
+        const baselineY = localY(r.top) + ascender * fontSize;
+        const path = font.getPath(text, xLeft, baselineY, fontSize);
+        const d = path.toPathData(3);
+        if (d) {
+          const el = document.createElementNS(SVG_NS, "path");
+          el.setAttribute("d", d);
+          el.setAttribute("fill", fill);
+          g.appendChild(el);
+          continue;
+        }
+      }
+
+      const baselineY = localY(r.top) + fontSize * 0.78;
       const t = document.createElementNS(SVG_NS, "text");
-      t.setAttribute("x", String(textX));
+      t.setAttribute("x", String(xLeft));
       t.setAttribute("y", String(baselineY));
       t.setAttribute("font-family", cs.fontFamily);
       t.setAttribute("font-size", `${fontSize}`);
       if (cs.fontStyle && cs.fontStyle !== "normal") t.setAttribute("font-style", cs.fontStyle);
-      if (cs.fontWeight && cs.fontWeight !== "400" && cs.fontWeight !== "normal") {
+      if (cs.fontWeight && cs.fontWeight !== "400" && cs.fontWeight !== "normal")
         t.setAttribute("font-weight", cs.fontWeight);
-      }
-      t.setAttribute("fill", cs.color || "#000");
+      t.setAttribute("fill", fill);
       t.setAttribute("xml:space", "preserve");
       t.textContent = text;
       g.appendChild(t);
@@ -166,185 +273,6 @@ function flattenLatexForeignObject(liveFo: SVGForeignObjectElement): SVGGElement
   } catch {
     return null;
   }
-}
-
-/* ---- KaTeX CSS with fonts inlined as data URIs ---- */
-
-let embeddedKatexCssCache: Promise<string> | null = null;
-
-function getEmbeddedKatexCss(): Promise<string> {
-  if (!embeddedKatexCssCache) embeddedKatexCssCache = buildEmbeddedKatexCss();
-  return embeddedKatexCssCache;
-}
-
-async function buildEmbeddedKatexCss(): Promise<string> {
-  const sheets = Array.from(document.styleSheets);
-  const fontFaces: string[] = [];
-  const others: string[] = [];
-  for (const sheet of sheets) {
-    let rules: CSSRuleList | null = null;
-    try {
-      rules = sheet.cssRules;
-    } catch {
-      continue; // CORS — ignore
-    }
-    if (!rules) continue;
-    for (const rule of Array.from(rules)) {
-      const txt = rule.cssText;
-      if (txt.startsWith("@font-face") && txt.includes("KaTeX")) fontFaces.push(txt);
-      else if (txt.includes(".katex")) others.push(txt);
-    }
-  }
-
-  const inlinedFontFaces = await Promise.all(fontFaces.map(inlineFontFaceUrls));
-  return [...inlinedFontFaces, ...others].join("\n");
-}
-
-const fontDataUriCache = new Map<string, Promise<string>>();
-
-async function inlineFontFaceUrls(rule: string): Promise<string> {
-  // Match url(...) tokens, prefer woff2/woff sources (the `src:` list usually
-  // has multiple formats). We rewrite each url() to a data: URI.
-  const urlPattern = /url\(\s*(['"]?)([^)'"]+)\1\s*\)(\s*format\(\s*['"]?([^)'"]+)['"]?\s*\))?/g;
-  const found: { full: string; url: string; format: string }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = urlPattern.exec(rule))) {
-    found.push({ full: m[0], url: m[2], format: (m[4] || "").toLowerCase() });
-  }
-  if (found.length === 0) return rule;
-  // Prefer woff2 → woff → ttf for a single inlined source.
-  const ranked = [...found].sort((a, b) => formatRank(a.format) - formatRank(b.format));
-  const chosen = ranked[0];
-  try {
-    const dataUri = await fetchAsDataUri(chosen.url);
-    const fmt = chosen.format || formatFromUrl(chosen.url);
-    const newSrc = `src: url(${dataUri})${fmt ? ` format("${fmt}")` : ""}`;
-    return rule.replace(/src\s*:\s*[^;]+;?/, newSrc + ";");
-  } catch {
-    return rule;
-  }
-}
-
-function formatRank(fmt: string): number {
-  if (fmt === "woff2") return 0;
-  if (fmt === "woff") return 1;
-  if (fmt === "truetype" || fmt === "ttf") return 2;
-  return 3;
-}
-
-function formatFromUrl(url: string): string {
-  if (/\.woff2(\?|$)/i.test(url)) return "woff2";
-  if (/\.woff(\?|$)/i.test(url)) return "woff";
-  if (/\.ttf(\?|$)/i.test(url)) return "truetype";
-  return "";
-}
-
-function fetchAsDataUri(url: string): Promise<string> {
-  let cached = fontDataUriCache.get(url);
-  if (cached) return cached;
-  cached = (async () => {
-    const abs = new URL(url, document.baseURI).href;
-    const res = await fetch(abs, { credentials: "omit", mode: "cors" });
-    if (!res.ok) throw new Error(`Font fetch failed: ${abs}`);
-    const buf = await res.arrayBuffer();
-    const b64 = arrayBufferToBase64(buf);
-    const mime =
-      /\.woff2(\?|$)/i.test(url)
-        ? "font/woff2"
-        : /\.woff(\?|$)/i.test(url)
-          ? "font/woff"
-          : "font/ttf";
-    return `data:${mime};base64,${b64}`;
-  })();
-  fontDataUriCache.set(url, cached);
-  return cached;
-}
-
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let s = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk) as unknown as number[]);
-  }
-  return btoa(s);
-}
-
-/* ---- KaTeX fonts registered with jsPDF for vector text rendering ---- */
-
-interface KatexFontEntry {
-  family: string;
-  style: "normal" | "italic" | "bold" | "bolditalic";
-  ttfUrl: string;
-}
-
-let katexPdfFontsCache: Promise<KatexFontEntry[]> | null = null;
-
-function discoverKatexPdfFonts(): Promise<KatexFontEntry[]> {
-  if (!katexPdfFontsCache) katexPdfFontsCache = doDiscoverKatexPdfFonts();
-  return katexPdfFontsCache;
-}
-
-async function doDiscoverKatexPdfFonts(): Promise<KatexFontEntry[]> {
-  const entries: KatexFontEntry[] = [];
-  const seen = new Set<string>();
-  const sheets = Array.from(document.styleSheets);
-  for (const sheet of sheets) {
-    let rules: CSSRuleList | null = null;
-    try {
-      rules = sheet.cssRules;
-    } catch {
-      continue;
-    }
-    if (!rules) continue;
-    for (const rule of Array.from(rules)) {
-      const r = rule as CSSFontFaceRule;
-      if (r.type !== CSSRule.FONT_FACE_RULE) continue;
-      const txt = r.cssText;
-      if (!txt.includes("KaTeX")) continue;
-      const family = (r.style.getPropertyValue("font-family") || "").replace(/['"]/g, "").trim();
-      const cssStyle = (r.style.getPropertyValue("font-style") || "normal").trim();
-      const cssWeight = (r.style.getPropertyValue("font-weight") || "400").trim();
-      const isBold = cssWeight === "bold" || parseInt(cssWeight, 10) >= 600;
-      const isItalic = cssStyle === "italic" || cssStyle === "oblique";
-      const style: KatexFontEntry["style"] = isBold && isItalic
-        ? "bolditalic"
-        : isBold
-          ? "bold"
-          : isItalic
-            ? "italic"
-            : "normal";
-      const ttfMatch = /url\(\s*(['"]?)([^)'"]+\.ttf[^)'"]*)\1\s*\)\s*format\(\s*['"]?(?:truetype|ttf)['"]?\s*\)/i.exec(
-        txt
-      );
-      if (!ttfMatch) continue;
-      const key = `${family}|${style}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      entries.push({ family, style, ttfUrl: ttfMatch[2] });
-    }
-  }
-  return entries;
-}
-
-async function registerKatexFontsInPdf(pdf: jsPDF): Promise<void> {
-  const fonts = await discoverKatexPdfFonts();
-  await Promise.all(
-    fonts.map(async (f) => {
-      try {
-        const abs = new URL(f.ttfUrl, document.baseURI).href;
-        const res = await fetch(abs, { credentials: "omit", mode: "cors" });
-        if (!res.ok) return;
-        const buf = await res.arrayBuffer();
-        const b64 = arrayBufferToBase64(buf);
-        const vfsName = `${f.family}-${f.style}.ttf`;
-        pdf.addFileToVFS(vfsName, b64);
-        pdf.addFont(vfsName, f.family, f.style);
-      } catch {
-        /* font registration is best-effort; svg2pdf falls back to a default */
-      }
-    })
-  );
 }
 
 /**
@@ -425,7 +353,6 @@ export async function performExport(svgEl: SVGSVGElement | null, opts: ExportOpt
       if (!svgForPdf) throw new Error("Failed to materialize SVG for PDF export");
 
       const rect = svgEl.getBoundingClientRect();
-      // SVG units are CSS pixels; PDF unit "pt" is 1/72". Convert via 96 dpi.
       const ptW = (rect.width * 72) / 96;
       const ptH = (rect.height * 72) / 96;
       const pdf = new jsPDF({
@@ -434,7 +361,6 @@ export async function performExport(svgEl: SVGSVGElement | null, opts: ExportOpt
         format: [ptW, ptH],
         compress: true,
       });
-      await registerKatexFontsInPdf(pdf);
       await svg2pdf(svgForPdf, pdf, { x: 0, y: 0, width: ptW, height: ptH });
       const blob = pdf.output("blob") as Blob;
       await saveBlob(blob, filename, "application/pdf");
@@ -448,7 +374,6 @@ export async function performExport(svgEl: SVGSVGElement | null, opts: ExportOpt
 function ensureExtension(name: string, fmt: ExportFormat): string {
   const expected = "." + (fmt === "json" ? "json" : fmt);
   if (name.toLowerCase().endsWith(expected)) return name;
-  // strip any existing extension and add the right one
   const dot = name.lastIndexOf(".");
   const base = dot > 0 ? name.slice(0, dot) : name;
   return base + expected;
