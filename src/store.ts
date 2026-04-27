@@ -59,6 +59,15 @@ interface ClipboardState {
   clipboard: DiagramObject[];
 }
 
+interface ViewState {
+  zoom: number;
+  pan: { x: number; y: number };
+}
+
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 8;
+const ZOOM_STEP = 1.25;
+
 interface Actions {
   setTool: (tool: Tool) => void;
   setPendingShape: (s: ShapeKind | null) => void;
@@ -103,6 +112,13 @@ interface Actions {
 
   setSettings: (patch: Partial<Settings>) => void;
 
+  /** View transform — zoom factor and pan offset (in CSS pixels). */
+  setZoom: (zoom: number, anchor?: { x: number; y: number }) => void;
+  setPan: (pan: { x: number; y: number }) => void;
+  zoomIn: (anchor?: { x: number; y: number }) => void;
+  zoomOut: (anchor?: { x: number; y: number }) => void;
+  resetView: () => void;
+
   pushHistory: () => void;
   undo: () => void;
   redo: () => void;
@@ -121,6 +137,7 @@ const initial: DiagramState = {
 
 const initialHistory: HistoryState = { past: [], future: [] };
 const initialClipboard: ClipboardState = { clipboard: [] };
+const initialView: ViewState = { zoom: 1, pan: { x: 0, y: 0 } };
 
 function snapshot(s: { objects: DiagramObject[] }): Snapshot {
   return { objects: s.objects.map((o) => structuredClone(o)) };
@@ -141,10 +158,11 @@ function defaultsFor(style: LineStyle): { amplitude: number; wavelength: number;
   }
 }
 
-export const useStore = create<DiagramState & HistoryState & ClipboardState & Actions>((set, get) => ({
+export const useStore = create<DiagramState & HistoryState & ClipboardState & ViewState & Actions>((set, get) => ({
   ...initial,
   ...initialHistory,
   ...initialClipboard,
+  ...initialView,
 
   setTool: (tool) => set({ tool }),
   setPendingShape: (pendingShape) => set({ pendingShape }),
@@ -461,6 +479,26 @@ export const useStore = create<DiagramState & HistoryState & ClipboardState & Ac
     persistSettings(next);
     set({ settings: next });
   },
+
+  setZoom: (zoom, anchor) => {
+    const s = get();
+    const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+    if (anchor) {
+      // Adjust pan so the anchor screen point stays over the same content point.
+      const factor = next / s.zoom;
+      const pan = {
+        x: anchor.x - (anchor.x - s.pan.x) * factor,
+        y: anchor.y - (anchor.y - s.pan.y) * factor,
+      };
+      set({ zoom: next, pan });
+    } else {
+      set({ zoom: next });
+    }
+  },
+  setPan: (pan) => set({ pan }),
+  zoomIn: (anchor) => get().setZoom(get().zoom * ZOOM_STEP, anchor),
+  zoomOut: (anchor) => get().setZoom(get().zoom / ZOOM_STEP, anchor),
+  resetView: () => set({ zoom: 1, pan: { x: 0, y: 0 } }),
 
   pushHistory: () => {
     const s = get();

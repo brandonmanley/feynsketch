@@ -113,6 +113,16 @@ body {
   cursor: default;
   background: #fafbfc;
 }
+.zoombar {
+  margin-left: 6px;
+}
+.zoom-readout {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 48px;
+  padding: 5px 8px;
+  color: var(--text-dim);
+}
 .kbd {
   font-size: 11px;
   font-family: ui-monospace, SF Mono, Menlo, monospace;

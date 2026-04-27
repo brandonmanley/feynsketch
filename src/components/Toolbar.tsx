@@ -46,6 +46,10 @@ export function Toolbar({
   const bringToFront = useStore((s) => s.bringToFront);
   const sendToBack = useStore((s) => s.sendToBack);
   const removeMany = useStore((s) => s.removeMany);
+  const zoom = useStore((s) => s.zoom);
+  const zoomIn = useStore((s) => s.zoomIn);
+  const zoomOut = useStore((s) => s.zoomOut);
+  const resetView = useStore((s) => s.resetView);
 
   const [openMenu, setOpenMenu] = useState<null | "file" | "edit" | "insert" | "shapes">(null);
   const [showExport, setShowExport] = useState(false);
@@ -339,6 +343,33 @@ export function Toolbar({
             aria-label="Redo"
           >
             ↷
+          </button>
+        </div>
+
+        <div className="iconbar zoombar">
+          <button
+            className="icon-btn"
+            onClick={() => zoomOut()}
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <button
+            className="icon-btn zoom-readout"
+            onClick={resetView}
+            title="Reset zoom (100%)"
+            aria-label="Reset zoom"
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            className="icon-btn"
+            onClick={() => zoomIn()}
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            +
           </button>
         </div>
 

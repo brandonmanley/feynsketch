@@ -1,4 +1,4 @@
-import { forwardRef, useRef, useState } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import type { DiagramObject, Point } from "../types";
 import { LineRenderer } from "./LineRenderer";
@@ -78,15 +78,25 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
   const settings = useStore((s) => s.settings);
   const pushHistory = useStore((s) => s.pushHistory);
   const removeAnchor = useStore((s) => s.removeAnchor);
+  const zoom = useStore((s) => s.zoom);
+  const pan = useStore((s) => s.pan);
+  const setZoom = useStore((s) => s.setZoom);
+  const setPan = useStore((s) => s.setPan);
 
   const [drag, setDrag] = useState<Drag>(null);
   const tempPath = useRef<SVGPathElement>(null);
 
   const selectedSet = new Set(selectedIds);
 
+  // Convert a pointer event into the (zoomed, panned) content coordinate
+  // system. SVG width/height match the element's bounding box so the local
+  // coordinates are screen pixels; we then undo the view transform.
   const toLocal = (e: React.PointerEvent, svg: SVGSVGElement): Point => {
     const rect = svg.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    return {
+      x: (e.clientX - rect.left - pan.x) / zoom,
+      y: (e.clientY - rect.top - pan.y) / zoom,
+    };
   };
 
   const rootSvg = (): SVGSVGElement | null =>
@@ -313,6 +323,35 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
         }
       : null;
 
+  // Wheel: Ctrl/Cmd + wheel zooms around the cursor; plain wheel pans. Attach
+  // imperatively because React's onWheel is passive and can't preventDefault.
+  useEffect(() => {
+    const svg = typeof ref === "object" && ref ? (ref as React.RefObject<SVGSVGElement>).current : null;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      const rect = svg.getBoundingClientRect();
+      const ax = e.clientX - rect.left;
+      const ay = e.clientY - rect.top;
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.0015);
+        setZoom(useStore.getState().zoom * factor, { x: ax, y: ay });
+      } else if (Math.abs(e.deltaX) > 0 || Math.abs(e.deltaY) > 0) {
+        e.preventDefault();
+        const cur = useStore.getState().pan;
+        setPan({ x: cur.x - e.deltaX, y: cur.y - e.deltaY });
+      }
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [ref, setZoom, setPan]);
+
+  // Background grid uses the SVG element's untransformed coords so it always
+  // covers the visible area, with the pattern's offset following the pan and
+  // its cell size following the zoom — gives a smooth "infinite paper" feel.
+  const gridOffsetX = ((pan.x % (settings.gridSize * zoom)) + settings.gridSize * zoom) % (settings.gridSize * zoom);
+  const gridOffsetY = ((pan.y % (settings.gridSize * zoom)) + settings.gridSize * zoom) % (settings.gridSize * zoom);
+
   return (
     <svg
       ref={ref}
@@ -327,16 +366,42 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
       style={{ touchAction: "none", background: "#ffffff" }}
     >
       <defs>
-        <pattern id="edit-grid" width={settings.gridSize} height={settings.gridSize} patternUnits="userSpaceOnUse">
-          <path d={`M ${settings.gridSize} 0 L 0 0 0 ${settings.gridSize}`} fill="none" stroke="#f1f1f1" strokeWidth="1" />
+        <pattern
+          id="edit-grid"
+          width={settings.gridSize * zoom}
+          height={settings.gridSize * zoom}
+          patternUnits="userSpaceOnUse"
+          x={gridOffsetX}
+          y={gridOffsetY}
+        >
+          <path
+            d={`M ${settings.gridSize * zoom} 0 L 0 0 0 ${settings.gridSize * zoom}`}
+            fill="none"
+            stroke="#f1f1f1"
+            strokeWidth="1"
+          />
         </pattern>
         {settings.snap && (
-          <pattern id="edit-grid-dots" width={settings.gridSize} height={settings.gridSize} patternUnits="userSpaceOnUse">
+          <pattern
+            id="edit-grid-dots"
+            width={settings.gridSize * zoom}
+            height={settings.gridSize * zoom}
+            patternUnits="userSpaceOnUse"
+            x={gridOffsetX}
+            y={gridOffsetY}
+          >
             <circle cx={0} cy={0} r={1.2} fill="#cfd6e2" />
           </pattern>
         )}
       </defs>
-      <rect data-editor-only width={width} height={height} fill={settings.snap ? "url(#edit-grid-dots)" : "url(#edit-grid)"} />
+      <rect
+        data-editor-only
+        width={width}
+        height={height}
+        fill={settings.snap ? "url(#edit-grid-dots)" : "url(#edit-grid)"}
+      />
+
+      <g data-view-root transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
 
       {objects.map((obj) => {
         const selected = selectedSet.has(obj.id);
@@ -393,6 +458,7 @@ export const EditCanvas = forwardRef<SVGSVGElement, { width: number; height: num
           strokeWidth={1}
         />
       )}
+      </g>
     </svg>
   );
 });
